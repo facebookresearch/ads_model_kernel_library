@@ -122,7 +122,7 @@ def raw(x):
 
 
 @triton.jit  # pragma: no cover
-def raw_grad(x):
+def raw_grad(x: tl.tensor) -> float:
     return 1.0
 
 
@@ -323,7 +323,7 @@ def fast_gelu_bf16_grad(x):
 
 
 @triton.jit  # pragma: no cover
-def silu(x):
+def silu(x: tl.tensor) -> tl.tensor:
     return x * tl.sigmoid(x)
 
 
