@@ -12,8 +12,6 @@ import argparse
 import time
 
 import torch
-
-
 from ads_mkl.ops.cute_dsl.gdpa.src.interface import (
     cutedsl_generalized_dot_product_attention,
     flash_attn_varlen_func,
@@ -67,7 +65,7 @@ def compute_error_metrics(pred: torch.Tensor, ref: torch.Tensor) -> dict:
     }
 
 
-def benchmark_fp8(activation: str = "fast_gelu"):
+def benchmark_fp8(activation: str = "fast_gelu") -> None:
     """Run FP8 E4M3 benchmark with accuracy verification."""
     device = "cuda"
     generate_traces = True  # Set to True to generate perfdoctor traces
@@ -153,9 +151,9 @@ def benchmark_fp8(activation: str = "fast_gelu"):
         return
 
     metrics = compute_error_metrics(out_fp8, out_bf16)
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("FP8 E4M3 vs BF16 Accuracy")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  Mean Absolute Error: {metrics['mean_abs_err']:.6f}")
     print(f"  Max Absolute Error: {metrics['max_abs_err']:.6f}")
     print(f"  Mismatch Rate: {metrics['mismatch_pct']:.2f}%")
@@ -166,9 +164,9 @@ def benchmark_fp8(activation: str = "fast_gelu"):
         print(f"\n⚠️  WARNING: High mismatch rate ({metrics['mismatch_pct']:.2f}%)")
 
     # Benchmark
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Performance Benchmark")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Calculate FLOPs for forward pass
     nFLOPS_fwd = flops(
@@ -216,13 +214,13 @@ def benchmark_fp8(activation: str = "fast_gelu"):
     print(f"  FP8:  {time_fp8:.3f} ms, {tflops_fp8:.1f} TFLOPS")
     print(f"  BF16: {time_bf16:.3f} ms, {tflops_bf16:.1f} TFLOPS")
     print(f"  Speedup: {time_bf16 / time_fp8:.2f}x")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Generate perfdoctor traces for performance investigation
     if generate_traces:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Generating perfdoctor traces...")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Warmup before profiling FP8
         for _ in range(3):
@@ -285,7 +283,7 @@ def benchmark_fp8(activation: str = "fast_gelu"):
         print(f"\nPerfdoctor Traces:")
         print(f"  FP8 Forward:  {trace_url_fp8}")
         print(f"  BF16 Forward: {trace_url_bf16}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
 
 def benchmark_fp8_backward(activation: str = "gelu"):
@@ -298,9 +296,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
     nheads = 4
     headdim = 128
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Backward Pass Benchmark (FP8 and BF16)")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(
         f"Config: {batch_size=}, {seqlen_q=}, {seqlen_k=}, {nheads=}, {headdim=}, {activation=}"
     )
@@ -330,7 +328,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
     qk_scale = 1.0 / (headdim**0.5)
 
     # Create gradient of output
-    dout_fp32 = torch.randn(total_q, nheads, headdim, device=device, dtype=torch.float32) * 0.1
+    dout_fp32 = (
+        torch.randn(total_q, nheads, headdim, device=device, dtype=torch.float32) * 0.1
+    )
     dout_bf16 = dout_fp32.to(torch.bfloat16)
     dout_fp8 = dout_fp32.to(torch.float8_e4m3fn)
 
@@ -384,9 +384,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
     torch.cuda.synchronize()
 
     # Validate and compare gradients
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Gradient Validation (FP8 vs BF16)")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     for name, fp8_grad, bf16_grad in [
         ("dQ", dq_fp8, dq_bf16),
@@ -404,22 +404,37 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         # Compare FP8 vs BF16 gradients
         metrics = compute_error_metrics(fp8_grad_f32, bf16_grad_f32)
         threshold = 15.0
-        status = "PASS" if not has_nan_fp8 and not has_inf_fp8 and metrics["mismatch_pct"] < threshold else "FAIL"
+        status = (
+            "PASS"
+            if not has_nan_fp8
+            and not has_inf_fp8
+            and metrics["mismatch_pct"] < threshold
+            else "FAIL"
+        )
 
-        print(f"  {name}: nan={has_nan_fp8}, inf={has_inf_fp8} | "
-              f"mean_err={metrics['mean_abs_err']:.6f}, max_err={metrics['max_abs_err']:.6f}, "
-              f"mismatch={metrics['mismatch_pct']:.2f}% [{status}]")
+        print(
+            f"  {name}: nan={has_nan_fp8}, inf={has_inf_fp8} | "
+            f"mean_err={metrics['mean_abs_err']:.6f}, max_err={metrics['max_abs_err']:.6f}, "
+            f"mismatch={metrics['mismatch_pct']:.2f}% [{status}]"
+        )
 
     print("FP8 backward completed without crash!")
     # return  # Skip benchmarking for now
 
     # Benchmark backward pass
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Backward Pass Performance")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     nFLOPS_bwd = flops(
-        batch_size, nheads, seqlen_q, seqlen_k, headdim, headdim, causal=False, mode="bwd"
+        batch_size,
+        nheads,
+        seqlen_q,
+        seqlen_k,
+        headdim,
+        headdim,
+        causal=False,
+        mode="bwd",
     )
 
     def bench_backward_bf16():
@@ -427,7 +442,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         k = k_fp32.to(torch.bfloat16).requires_grad_(True)
         v = v_fp32.to(torch.bfloat16).requires_grad_(True)
         out, _ = cutedsl_generalized_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             softmax_scale=qk_scale,
@@ -440,7 +457,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         k = k_fp32.to(torch.float8_e4m3fn).requires_grad_(True)
         v = v_fp32.to(torch.float8_e4m3fn).requires_grad_(True)
         out, _ = cutedsl_generalized_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             softmax_scale=qk_scale,
@@ -460,13 +479,13 @@ def benchmark_fp8_backward(activation: str = "gelu"):
     print(f"  BF16 (fwd+bwd): {time_bwd_bf16:.3f} ms, {tflops_bwd_bf16:.1f} TFLOPS")
     print(f"  FP8 (fwd+bwd):  {time_bwd_fp8:.3f} ms, {tflops_bwd_fp8:.1f} TFLOPS")
     print(f"  Speedup: {time_bwd_bf16 / time_bwd_fp8:.2f}x")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Generate traces for backward pass
     if generate_traces:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Generating backward pass traces...")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         mf_path_prefix = "manifold://pyper_traces/"
         timestamp = int(time.time())
@@ -484,7 +503,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
             ],
             record_shapes=True,
             with_stack=True,
-            on_trace_ready=lambda p: p.export_chrome_trace(mf_path_prefix + mf_path_bwd_bf16),
+            on_trace_ready=lambda p: p.export_chrome_trace(
+                mf_path_prefix + mf_path_bwd_bf16
+            ),
         ):
             for _ in range(10):
                 bench_backward_bf16()
@@ -505,7 +526,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
             ],
             record_shapes=True,
             with_stack=True,
-            on_trace_ready=lambda p: p.export_chrome_trace(mf_path_prefix + mf_path_bwd_fp8),
+            on_trace_ready=lambda p: p.export_chrome_trace(
+                mf_path_prefix + mf_path_bwd_fp8
+            ),
         ):
             for _ in range(10):
                 bench_backward_fp8()
@@ -516,7 +539,7 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         print(f"\nPerfdoctor Traces (Backward):")
         print(f"  BF16 Backward: {trace_url_bwd_bf16}")
         print(f"  FP8 Backward:  {trace_url_bwd_fp8}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
 
 if __name__ == "__main__":
