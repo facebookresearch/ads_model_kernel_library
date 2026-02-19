@@ -1,22 +1,23 @@
 # @nolint
 # Copyright (c) 2025, Tri Dao.
 # pyre-ignore-all-errors
-from typing import Optional, Tuple
 from dataclasses import dataclass, fields
-
-import cutlass
-import cutlass.cute as cute
-from cutlass import Int32
+from typing import Optional, Tuple
 
 import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
-from ads_mkl.ops.cute_dsl.gdpa.src.fast_math import FastDivmod, clz
+import cutlass
+import cutlass.cute as cute
+from ads_mkl.ops.cute_dsl.gdpa.src.fast_math import clz, FastDivmod
+from cutlass import Int32
 
 
 @dataclass
 class ParamsBase:
     def __extract_mlir_values__(self):
         all_fields = [getattr(self, field.name) for field in fields(self)]
-        non_constexpr_fields = [f for f in all_fields if not isinstance(f, cutlass.Constexpr)]
+        non_constexpr_fields = [
+            f for f in all_fields if not isinstance(f, cutlass.Constexpr)
+        ]
         values, self._values_pos = [], []
         for obj in non_constexpr_fields:
             obj_values = cutlass.extract_mlir_values(obj)
@@ -26,12 +27,18 @@ class ParamsBase:
 
     def __new_from_mlir_values__(self, values):
         all_fields = {field.name: getattr(self, field.name) for field in fields(self)}
-        constexpr_fields = {n: f for n, f in all_fields.items() if isinstance(f, cutlass.Constexpr)}
+        constexpr_fields = {
+            n: f for n, f in all_fields.items() if isinstance(f, cutlass.Constexpr)
+        }
         non_constexpr_fields = {
             n: f for n, f in all_fields.items() if not isinstance(f, cutlass.Constexpr)
         }
-        for (name, field), n_items in zip(non_constexpr_fields.items(), self._values_pos):
-            non_constexpr_fields[name] = cutlass.new_from_mlir_values(field, values[:n_items])
+        for (name, field), n_items in zip(
+            non_constexpr_fields.items(), self._values_pos
+        ):
+            non_constexpr_fields[name] = cutlass.new_from_mlir_values(
+                field, values[:n_items]
+            )
             values = values[n_items:]
         return self.__class__(**non_constexpr_fields, **constexpr_fields)
 
@@ -73,7 +80,9 @@ class SingleTileScheduler:
         def create(
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileScheduler.Params":
-            return SingleTileScheduler.Params(args.num_block, args.num_head, args.num_batch)
+            return SingleTileScheduler.Params(
+                args.num_block, args.num_head, args.num_batch
+            )
 
     def __init__(self, blk_coord: cute.Coord, *, loc=None, ip=None):
         self._blk_coord = blk_coord
@@ -82,7 +91,9 @@ class SingleTileScheduler:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return SingleTileScheduler.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
@@ -141,7 +152,9 @@ class StaticPersistentTileScheduler:
         ) -> "StaticPersistentTileScheduler.Params":
             total_blocks = args.num_block * args.num_head * args.num_batch
             return StaticPersistentTileScheduler.Params(
-                FastDivmod.create(args.num_block), FastDivmod.create(args.num_head), total_blocks
+                FastDivmod.create(args.num_block),
+                FastDivmod.create(args.num_head),
+                total_blocks,
             )
 
     def __init__(self, params: Params, tile_idx: Int32, *, loc=None, ip=None):
@@ -151,7 +164,9 @@ class StaticPersistentTileScheduler:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return StaticPersistentTileScheduler.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
@@ -201,7 +216,10 @@ class StaticPersistentTileScheduler:
 
     def __new_from_mlir_values__(self, values):
         obj_list = []
-        for obj, n_items in zip([self.params, self._tile_idx], self._values_pos,):
+        for obj, n_items in zip(
+            [self.params, self._tile_idx],
+            self._values_pos,
+        ):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
         return StaticPersistentTileScheduler(*(tuple(obj_list)), loc=self._loc)
@@ -224,7 +242,9 @@ class SingleTileLPTScheduler:
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileLPTScheduler.Params":
             # cute.printf(args.num_block, args.num_head, args.num_batch, args.seqlen_k, args.headdim, args.headdim_v, args.total_len, args.tile_shape_mn, args.qhead_per_kvhead_packgqa, args.element_size)
-            size_one_kv_head = args.seqlen_k * (args.headdim + args.headdim_v) * args.element_size
+            size_one_kv_head = (
+                args.seqlen_k * (args.headdim + args.headdim_v) * args.element_size
+            )
             size_one_head = size_one_kv_head
             size_l2 = 50 * 1024 * 1024  # 40 MB for K & V
             # Swizzle is the size of each "section". Round swizzle to a power of 2
@@ -233,7 +253,11 @@ class SingleTileLPTScheduler:
             # swizzle = 1 if size_l2 < size_one_head else (size_l2 // size_one_head)
             # Seems faster if swizzle if a power of 2
             log2_floor = lambda n: 31 - clz(n)
-            swizzle = 1 if size_l2 < size_one_head else (1 << log2_floor(size_l2 // size_one_head))
+            swizzle = (
+                1
+                if size_l2 < size_one_head
+                else (1 << log2_floor(size_l2 // size_one_head))
+            )
             # swizzle = 1 if size_l2 < size_one_head else (size_l2 // size_one_head)
             # If we're in the last section (called residual), we don't want to divide by
             # swizzle. Instead we want to divide by the remainder.
@@ -258,7 +282,9 @@ class SingleTileLPTScheduler:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return SingleTileLPTScheduler.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
@@ -343,7 +369,11 @@ class SingleTileVarlenScheduler:
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileVarlenScheduler.Params":
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
-            max_kvblock_in_l2 = size_l2 // ((args.headdim + args.headdim_v) * args.element_size * args.tile_shape_mn[1])
+            max_kvblock_in_l2 = size_l2 // (
+                (args.headdim + args.headdim_v)
+                * args.element_size
+                * args.tile_shape_mn[1]
+            )
             assert args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None, (
                 "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
             )
@@ -367,7 +397,9 @@ class SingleTileVarlenScheduler:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return SingleTileVarlenScheduler.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
@@ -418,7 +450,9 @@ class SingleTileVarlenScheduler:
         num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=0)
         num_m_blocks_cumulative = utils.warp_prefix_sum(num_m_blocks, lane_idx)
         # Total number of blocks for the next 31 batches
-        m_blocks_in_group = cute.arch.shuffle_sync(num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1)
+        m_blocks_in_group = cute.arch.shuffle_sync(
+            num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
+        )
         # Same for all lanes
         group_end_tile = m_blocks_in_group * params.num_head
         # if cute.arch.thread_idx()[0] == 128 + 31: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, group_end_tile = %d, num_m_blocks=%d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d", self._tile_idx, group_end_tile, num_m_blocks, num_m_blocks_cumulative, m_blocks_in_group)
@@ -446,32 +480,62 @@ class SingleTileVarlenScheduler:
             # that is greater than or equal to tile index.
             batch_idx_in_group = cute.arch.popc(
                 cute.arch.vote_ballot_sync(
-                    group_start_tile + num_m_blocks_cumulative * params.num_head <= next_tile_idx
+                    group_start_tile + num_m_blocks_cumulative * params.num_head
+                    <= next_tile_idx
                 )
             )
             batch_idx += batch_idx_in_group
             num_m_blocks_prev_lane = (
                 0
                 if batch_idx_in_group == 0
-                else cute.arch.shuffle_sync(num_m_blocks_cumulative, batch_idx_in_group - 1)
+                else cute.arch.shuffle_sync(
+                    num_m_blocks_cumulative, batch_idx_in_group - 1
+                )
             )
             num_m_blocks = cute.arch.shuffle_sync(num_m_blocks, batch_idx_in_group)
-            mh_block = next_tile_idx - group_start_tile - num_m_blocks_prev_lane * params.num_head
+            mh_block = (
+                next_tile_idx
+                - group_start_tile
+                - num_m_blocks_prev_lane * params.num_head
+            )
             if cutlass.const_expr(params.lpt):
                 # This is a version of the SingleTileLPTScheduler, complicated by the fact that
                 # the seqlen can vary per batch.
                 # TODO: is there any case where num_m_blocks is 0?
                 # TODO: by right we should read the seqlen_kv but we're assuming seqlen_q == seqlen_k here
-                num_n_blocks = num_m_blocks * params.tile_shape_mn[0] // params.qhead_per_kvhead_packgqa // params.tile_shape_mn[1]
+                num_n_blocks = (
+                    num_m_blocks
+                    * params.tile_shape_mn[0]
+                    // params.qhead_per_kvhead_packgqa
+                    // params.tile_shape_mn[1]
+                )
                 # nheads_in_l2 = min(max(self.max_kvblock_in_l2 // num_n_blocks, 1), self.num_head)
                 # Seems faster to have this be a power of 2
-                nheads_in_l2 = 16 if num_n_blocks * 16 <= params.max_kvblock_in_l2 else (8 if num_n_blocks * 8 <= params.max_kvblock_in_l2 else (4 if num_n_blocks * 4 <= params.max_kvblock_in_l2 else (2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1)))
+                nheads_in_l2 = (
+                    16
+                    if num_n_blocks * 16 <= params.max_kvblock_in_l2
+                    else (
+                        8
+                        if num_n_blocks * 8 <= params.max_kvblock_in_l2
+                        else (
+                            4
+                            if num_n_blocks * 4 <= params.max_kvblock_in_l2
+                            else (
+                                2 if num_n_blocks * 2 <= params.max_kvblock_in_l2 else 1
+                            )
+                        )
+                    )
+                )
                 nheads_in_l2 = min(nheads_in_l2, params.num_head)
                 mh_in_l2 = nheads_in_l2 * num_m_blocks
                 section_idx = mh_block // mh_in_l2
                 l2_mod = mh_block - section_idx * mh_in_l2
                 # Deal with tail section
-                nheads_in_this_section = nheads_in_l2 if nheads_in_l2 * (section_idx + 1) <= params.num_head else params.num_head - section_idx * nheads_in_l2
+                nheads_in_this_section = (
+                    nheads_in_l2
+                    if nheads_in_l2 * (section_idx + 1) <= params.num_head
+                    else params.num_head - section_idx * nheads_in_l2
+                )
                 block = l2_mod // nheads_in_this_section
                 head_idx_residual = l2_mod - block * nheads_in_this_section
                 head_idx = section_idx * nheads_in_l2 + head_idx_residual
@@ -505,12 +569,13 @@ class SingleTileVarlenScheduler:
 
     def __new_from_mlir_values__(self, values):
         obj_list = []
-        for obj, n_items in zip([self.params, self._tile_idx], self._values_pos,
+        for obj, n_items in zip(
+            [self.params, self._tile_idx],
+            self._values_pos,
         ):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
         return SingleTileVarlenScheduler(*(tuple(obj_list)), loc=self._loc)
-
 
 
 class SingleTileVarlenSchedulerSimple:
@@ -537,7 +602,11 @@ class SingleTileVarlenSchedulerSimple:
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileVarlenSchedulerSimple.Params":
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
-            max_kvblock_in_l2 = size_l2 // ((args.headdim + args.headdim_v) * args.element_size * args.tile_shape_mn[1])
+            max_kvblock_in_l2 = size_l2 // (
+                (args.headdim + args.headdim_v)
+                * args.element_size
+                * args.tile_shape_mn[1]
+            )
             assert args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None, (
                 "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
             )
@@ -566,11 +635,15 @@ class SingleTileVarlenSchedulerSimple:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return SingleTileVarlenSchedulerSimple.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
-    def create(params: Params, *, loc=None, ip=None) -> "SingleTileVarlenSchedulerSimple":
+    def create(
+        params: Params, *, loc=None, ip=None
+    ) -> "SingleTileVarlenSchedulerSimple":
         blk_coord = cute.arch.block_idx()
         return SingleTileVarlenSchedulerSimple(params, blk_coord, loc=loc, ip=ip)
 
@@ -582,27 +655,40 @@ class SingleTileVarlenSchedulerSimple:
         loc=None,
         ip=None,
     ) -> Tuple[Int32, Int32, Int32]:
-        max_seqlen = params.mMaxSeqlenK if cutlass.const_expr(params.is_bwd) else params.mMaxSeqlenQ        
+        max_seqlen = (
+            params.mMaxSeqlenK
+            if cutlass.const_expr(params.is_bwd)
+            else params.mMaxSeqlenQ
+        )
         blocks_m = cute.ceil_div(max_seqlen, params.tile_shape_mn[0])
         return blocks_m, params.num_head, params.num_batch
 
     @cute.jit
     def get_current_work(self, *, loc=None, ip=None) -> cutlass.utils.WorkTileInfo:
         params = self.params
-        batch_idx = self._blk_coord[2] 
-        # max_seqlen = params.mMaxSeqlenK if cutlass.const_expr(params.is_bwd) else params.mMaxSeqlenQ        
+        batch_idx = self._blk_coord[2]
+        # max_seqlen = params.mMaxSeqlenK if cutlass.const_expr(params.is_bwd) else params.mMaxSeqlenQ
         # cute.printf("scheduler, is_bwd=%d,  max_seqlen=%d", params.is_bwd, max_seqlen)
-        m_seq_used = params.mSeqUsedK if cutlass.const_expr(params.is_bwd) else params.mSeqUsedQ
-        m_cu_seqlen = params.mCuSeqlensK if cutlass.const_expr(params.is_bwd) else params.mCuSeqlensQ
+        m_seq_used = (
+            params.mSeqUsedK if cutlass.const_expr(params.is_bwd) else params.mSeqUsedQ
+        )
+        m_cu_seqlen = (
+            params.mCuSeqlensK
+            if cutlass.const_expr(params.is_bwd)
+            else params.mCuSeqlensQ
+        )
         if cutlass.const_expr(m_seq_used is not None):
             seqlen = Int32(0)
             if batch_idx < params.num_batch:
                 seqlen = m_seq_used[batch_idx]
         else:
             cur_cu_seqlen = m_cu_seqlen[batch_idx]
-            next_cu_seqlen = m_cu_seqlen[batch_idx+1]
+            next_cu_seqlen = m_cu_seqlen[batch_idx + 1]
             seqlen = next_cu_seqlen - cur_cu_seqlen
-        is_valid = self._is_first_block and self._blk_coord[0] * params.tile_shape_mn[0] < seqlen
+        is_valid = (
+            self._is_first_block
+            and self._blk_coord[0] * params.tile_shape_mn[0] < seqlen
+        )
         return cutlass.utils.WorkTileInfo(self._blk_coord, is_valid)
 
     def initial_work_tile_info(self, *, loc=None, ip=None):
@@ -625,11 +711,14 @@ class SingleTileVarlenSchedulerSimple:
 
     def __new_from_mlir_values__(self, values):
         obj_list = []
-        for obj, n_items in zip([self.params, self._blk_coord], self._values_pos,
+        for obj, n_items in zip(
+            [self.params, self._blk_coord],
+            self._values_pos,
         ):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
         return SingleTileVarlenSchedulerSimple(*(tuple(obj_list)), loc=self._loc)
+
 
 class SingleTileVarlenSchedulerPersistent:
     @dataclass
@@ -639,7 +728,7 @@ class SingleTileVarlenSchedulerPersistent:
         total_len: Int32
         max_kvblock_in_l2: Int32
         tile_shape_mn: cutlass.Constexpr[Tuple[int, int]]
-        mTileToBatch: cute.Tensor 
+        mTileToBatch: cute.Tensor
         mTileToHead: cute.Tensor
         mTileToBlock: cute.Tensor
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
@@ -652,10 +741,16 @@ class SingleTileVarlenSchedulerPersistent:
             args: TileSchedulerArguments, *, loc=None, ip=None
         ) -> "SingleTileVarlenSchedulerPersistent.Params":
             size_l2 = 50 * 1024 * 1024  # 50 MB for K & V
-            max_kvblock_in_l2 = size_l2 // ((args.headdim + args.headdim_v) * args.element_size * args.tile_shape_mn[1])
-            assert args.mTileToBatch is not None and args.mTileToHead is not None and args.mTileToBlock is not None, (
-                "mTileToBatch and mTileToHead and mTileToBlock must be provided"
+            max_kvblock_in_l2 = size_l2 // (
+                (args.headdim + args.headdim_v)
+                * args.element_size
+                * args.tile_shape_mn[1]
             )
+            assert (
+                args.mTileToBatch is not None
+                and args.mTileToHead is not None
+                and args.mTileToBlock is not None
+            ), "mTileToBatch and mTileToHead and mTileToBlock must be provided"
             # TODO: rename `total_len` to `total_len`
             total_blocks_max = (
                 args.total_len + args.num_batch * (args.tile_shape_mn[0] - 1)
@@ -669,10 +764,10 @@ class SingleTileVarlenSchedulerPersistent:
                 tile_shape_mn=args.tile_shape_mn,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
-                mTileToBatch = args.mTileToBatch,
-                mTileToHead = args.mTileToHead,
-                mTileToBlock = args.mTileToBlock,
-                total_blocks = total_blocks,
+                mTileToBatch=args.mTileToBatch,
+                mTileToHead=args.mTileToHead,
+                mTileToBlock=args.mTileToBlock,
+                total_blocks=total_blocks,
             )
 
     def __init__(self, params: Params, tile_idx: Int32, *, loc=None, ip=None):
@@ -682,11 +777,15 @@ class SingleTileVarlenSchedulerPersistent:
         self._ip = ip
 
     @staticmethod
-    def to_underlying_arguments(args: TileSchedulerArguments, *, loc=None, ip=None) -> Params:
+    def to_underlying_arguments(
+        args: TileSchedulerArguments, *, loc=None, ip=None
+    ) -> Params:
         return SingleTileVarlenSchedulerPersistent.Params.create(args, loc=loc, ip=ip)
 
     @staticmethod
-    def create(params: Params, *, loc=None, ip=None) -> "SingleTileVarlenSchedulerPersistent":
+    def create(
+        params: Params, *, loc=None, ip=None
+    ) -> "SingleTileVarlenSchedulerPersistent":
         tile_idx = cute.arch.block_idx()[0]
         return SingleTileVarlenSchedulerPersistent(params, tile_idx, loc=loc, ip=ip)
 
@@ -721,10 +820,10 @@ class SingleTileVarlenSchedulerPersistent:
     def initial_work_tile_info(self, *, loc=None, ip=None):
         return self.get_current_work(loc=loc, ip=ip)
 
-    def prefetch_next_work(self, *, loc=None, ip=None):
+    def prefetch_next_work(self, *, loc=None, ip=None) -> None:
         pass
 
-    def advance_to_next_work(self, *, loc=None, ip=None):
+    def advance_to_next_work(self, *, loc=None, ip=None) -> None:
         self._tile_idx += cute.arch.grid_dim()[0]
 
     def __extract_mlir_values__(self):
@@ -737,7 +836,9 @@ class SingleTileVarlenSchedulerPersistent:
 
     def __new_from_mlir_values__(self, values):
         obj_list = []
-        for obj, n_items in zip([self.params, self._tile_idx], self._values_pos,
+        for obj, n_items in zip(
+            [self.params, self._tile_idx],
+            self._values_pos,
         ):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
