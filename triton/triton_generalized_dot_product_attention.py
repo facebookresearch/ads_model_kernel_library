@@ -468,7 +468,7 @@ def _gdpa_fwd_compute(
     activation_enum_int: tl.constexpr,
     desc_k,
     desc_v,
-):
+) -> None:
     start_m = pid
     q_offset = off_h.to(tl.int64) * stride_qh
     kv_offset = off_h_kv.to(tl.int64) * stride_kh
@@ -2993,7 +2993,9 @@ def generalized_dot_product_attention(
     return o
 
 
-def _generalized_dot_product_attention_setup_context(ctx, inputs, output):
+def _generalized_dot_product_attention_setup_context(
+    ctx: Any, inputs: Tuple[Any, ...], output: Any
+) -> None:
     (
         query,
         key,
