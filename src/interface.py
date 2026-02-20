@@ -47,7 +47,7 @@ from torch.utils.flop_counter import (
 )
 
 
-def maybe_contiguous(x):
+def maybe_contiguous(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
@@ -1734,7 +1734,7 @@ def generalized_dot_product_attention_backward_flop(
     max_seqlen_q: Optional[int] = None,
     *args,
     **kwargs,
-):
+) -> int:
     shapes = _unpack_flash_attention_nested_shapes(
         query=q,
         key=k,
