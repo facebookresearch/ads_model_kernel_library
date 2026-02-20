@@ -252,11 +252,10 @@ class SingleTileLPTScheduler:
             # swizzle is how many heads can fit in L2
             # swizzle = 1 if size_l2 < size_one_head else (size_l2 // size_one_head)
             # Seems faster if swizzle if a power of 2
-            log2_floor = lambda n: 31 - clz(n)
             swizzle = (
                 1
                 if size_l2 < size_one_head
-                else (1 << log2_floor(size_l2 // size_one_head))
+                else (1 << (31 - clz(size_l2 // size_one_head)))
             )
             # swizzle = 1 if size_l2 < size_one_head else (size_l2 // size_one_head)
             # If we're in the last section (called residual), we don't want to divide by
@@ -324,13 +323,15 @@ class SingleTileLPTScheduler:
             (Int32(block), Int32(head_idx), Int32(batch_idx)), is_valid
         )
 
-    def initial_work_tile_info(self, *, loc=None, ip=None):
+    def initial_work_tile_info(
+        self, *, loc=None, ip=None
+    ) -> cutlass.utils.WorkTileInfo:
         return self.get_current_work(loc=loc, ip=ip)
 
-    def prefetch_next_work(self, *, loc=None, ip=None):
+    def prefetch_next_work(self, *, loc=None, ip=None) -> None:
         pass
 
-    def advance_to_next_work(self, *, loc=None, ip=None):
+    def advance_to_next_work(self, *, loc=None, ip=None) -> None:
         # Single tile scheduler - set to invalid tile_idx to indicate no more work
         self._tile_idx = self.params.total_blocks
 
