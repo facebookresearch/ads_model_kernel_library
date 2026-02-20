@@ -139,9 +139,9 @@ def cosh(x):
 
 
 @triton.jit  # pragma: no cover
-def relu(x):
+def relu(x: tl.tensor) -> tl.tensor:
     zero = 0.0
-    return tl.where(x >= 0, x, zero.to(x.dtype))
+    return tl.where(x >= 0, x, zero.to(x.dtype))  # pyre-fixme[16]
 
 
 @triton.jit  # pragma: no cover
@@ -278,7 +278,7 @@ if is_hip_mtia_or_a100():
     if is_amd():
 
         @triton.jit  # pragma: no cover
-        def sigmoid_approx_bf16(x):
+        def sigmoid_approx_bf16(x: tl.tensor) -> tl.tensor:
             x32 = x.to(tl.float32)
             y = tl.sigmoid(x32)
             return y.to(tl.bfloat16)
