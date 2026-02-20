@@ -328,7 +328,7 @@ def silu(x: tl.tensor) -> tl.tensor:
 
 
 @triton.jit  # pragma: no cover
-def silu_grad(x):
+def silu_grad(x: tl.tensor) -> tl.tensor:
     sig = tl.sigmoid(x)
     return sig * (1 + x * (1 - sig))
 
