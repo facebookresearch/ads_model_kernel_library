@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 # pyre-ignore-all-errors
 import cutlass
 import cutlass.cute as cute

@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 # @nolint
 # Copyright (c) 2025, Tri Dao.
 # Ported Cutlass code from C++ to Python:

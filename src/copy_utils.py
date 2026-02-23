@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 # Copyright (c) 2025, Wentao Guo, Ted Zadouri, Tri Dao.
 # pyre-ignore-all-errors
 import math

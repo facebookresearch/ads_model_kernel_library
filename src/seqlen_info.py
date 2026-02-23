@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 # @nolint
 # pyre-ignore-all-errors
 from typing import Optional

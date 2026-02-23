@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 """
 Imported from: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
 

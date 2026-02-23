@@ -1,3 +1,5 @@
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
 # @nolint
 # Supported features:
 # - BF16 & FP16 dtype
