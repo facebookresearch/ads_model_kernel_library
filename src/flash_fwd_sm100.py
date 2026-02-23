@@ -252,19 +252,18 @@ class FlashAttentionForwardSm100:
             self.num_regs_correction = 64  # TODO: re-allocate the unused "correction" regs to other warps
             self.num_regs_other = 48
         else:
-            self.num_regs_softmax = 192 if self.is_causal or self.is_local else 184
+            self.num_regs_softmax = 160
             # self.num_regs_softmax = 176
             # self.num_regs_correction = 96
             # self.num_regs_correction = 80
             # self.num_regs_correction = 64 if self.is_causal or self.is_local else 80
-            self.num_regs_correction = 64
-            # self.num_regs_other = 32
+            self.num_regs_correction = 72
             # self.num_regs_other = 64
             # self.num_regs_other = 80
             # self.num_regs_other = 48
             # self.num_regs_other = 96 if self.is_causal or self.is_local else 80
-            self.num_regs_other = 64 if self.is_causal or self.is_local else 80
-        self.num_regs_empty = 24
+            self.num_regs_other = 112
+        self.num_regs_empty = 16
 
         self.buffer_align_bytes = 1024
 
