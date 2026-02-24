@@ -1,7 +1,17 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-
-# @nolint
-# pyre-unsafe
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Minimal FP8 E4M3 benchmark for GDPA (varlen mode only).
 
@@ -14,12 +24,13 @@ import argparse
 import time
 
 import torch
-from ads_mkl.ops.cute_dsl.gdpa.src.interface import (
+from torch.profiler import profile
+from triton.testing import do_bench
+
+from ..src.interface import (
     cutedsl_generalized_dot_product_attention,
     flash_attn_varlen_func,
 )
-from torch.profiler import profile
-from triton.testing import do_bench
 
 
 def flops(
@@ -70,7 +81,7 @@ def compute_error_metrics(pred: torch.Tensor, ref: torch.Tensor) -> dict:
 def benchmark_fp8(activation: str = "fast_gelu") -> None:
     """Run FP8 E4M3 benchmark with accuracy verification."""
     device = "cuda"
-    generate_traces = True  # Set to True to generate perfdoctor traces
+    generate_traces = True  # Set to True to generate profiler traces
     batch_size = 256
     seqlen_q = 3072
     seqlen_k = 3072
@@ -218,10 +229,10 @@ def benchmark_fp8(activation: str = "fast_gelu") -> None:
     print(f"  Speedup: {time_bf16 / time_fp8:.2f}x")
     print(f"{'=' * 80}")
 
-    # Generate perfdoctor traces for performance investigation
+    # Generate profiler traces for performance investigation
     if generate_traces:
         print(f"\n{'=' * 80}")
-        print("Generating perfdoctor traces...")
+        print("Generating profiler traces...")
         print(f"{'=' * 80}")
 
         # Warmup before profiling FP8
@@ -248,11 +259,11 @@ def benchmark_fp8(activation: str = "fast_gelu") -> None:
                     activation=activation,
                 )
 
-        mf_path_prefix = "manifold://pyper_traces/"
         timestamp = int(time.time())
-        mf_path_fp8 = f"tree/efficient_module_suite/gdpa_fp8_fwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
-        p_fp8.export_chrome_trace(mf_path_prefix + mf_path_fp8)
-        trace_url_fp8 = f"https://www.internalfb.com/intern/perfdoctor/trace_view?filepath={mf_path_fp8}.gz&bucket=pyper_traces"
+        trace_path_fp8 = (
+            f"gdpa_fp8_fwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        )
+        p_fp8.export_chrome_trace(trace_path_fp8)
 
         # Warmup before profiling BF16
         for _ in range(3):
@@ -278,13 +289,14 @@ def benchmark_fp8(activation: str = "fast_gelu") -> None:
                     activation=activation,
                 )
 
-        mf_path_bf16 = f"tree/efficient_module_suite/gdpa_bf16_fwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
-        p_bf16.export_chrome_trace(mf_path_prefix + mf_path_bf16)
-        trace_url_bf16 = f"https://www.internalfb.com/intern/perfdoctor/trace_view?filepath={mf_path_bf16}.gz&bucket=pyper_traces"
+        trace_path_bf16 = (
+            f"gdpa_bf16_fwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        )
+        p_bf16.export_chrome_trace(trace_path_bf16)
 
-        print(f"\nPerfdoctor Traces:")
-        print(f"  FP8 Forward:  {trace_url_fp8}")
-        print(f"  BF16 Forward: {trace_url_bf16}")
+        print(f"\nProfiler Traces:")
+        print(f"  FP8 Forward:  {trace_path_fp8}")
+        print(f"  BF16 Forward: {trace_path_bf16}")
         print(f"{'=' * 80}")
 
 
@@ -489,7 +501,6 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         print("Generating backward pass traces...")
         print(f"{'=' * 80}")
 
-        mf_path_prefix = "manifold://pyper_traces/"
         timestamp = int(time.time())
 
         # Warmup and profile BF16 backward
@@ -497,7 +508,9 @@ def benchmark_fp8_backward(activation: str = "gelu"):
             bench_backward_bf16()
         torch.cuda.synchronize()
 
-        mf_path_bwd_bf16 = f"tree/efficient_module_suite/gdpa_bf16_bwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        trace_path_bwd_bf16 = (
+            f"gdpa_bf16_bwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        )
         with profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -505,22 +518,20 @@ def benchmark_fp8_backward(activation: str = "gelu"):
             ],
             record_shapes=True,
             with_stack=True,
-            on_trace_ready=lambda p: p.export_chrome_trace(
-                mf_path_prefix + mf_path_bwd_bf16
-            ),
+            on_trace_ready=lambda p: p.export_chrome_trace(trace_path_bwd_bf16),
         ):
             for _ in range(10):
                 bench_backward_bf16()
             torch.cuda.synchronize()
-
-        trace_url_bwd_bf16 = f"https://www.internalfb.com/intern/perfdoctor/trace_view?filepath={mf_path_bwd_bf16}.gz&bucket=pyper_traces"
 
         # Warmup and profile FP8 backward
         for _ in range(3):
             bench_backward_fp8()
         torch.cuda.synchronize()
 
-        mf_path_bwd_fp8 = f"tree/efficient_module_suite/gdpa_fp8_bwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        trace_path_bwd_fp8 = (
+            f"gdpa_fp8_bwd_{batch_size}x{seqlen_q}x{nheads}x{headdim}_{timestamp}.json"
+        )
         with profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -528,19 +539,15 @@ def benchmark_fp8_backward(activation: str = "gelu"):
             ],
             record_shapes=True,
             with_stack=True,
-            on_trace_ready=lambda p: p.export_chrome_trace(
-                mf_path_prefix + mf_path_bwd_fp8
-            ),
+            on_trace_ready=lambda p: p.export_chrome_trace(trace_path_bwd_fp8),
         ):
             for _ in range(10):
                 bench_backward_fp8()
             torch.cuda.synchronize()
 
-        trace_url_bwd_fp8 = f"https://www.internalfb.com/intern/perfdoctor/trace_view?filepath={mf_path_bwd_fp8}.gz&bucket=pyper_traces"
-
-        print(f"\nPerfdoctor Traces (Backward):")
-        print(f"  BF16 Backward: {trace_url_bwd_bf16}")
-        print(f"  FP8 Backward:  {trace_url_bwd_fp8}")
+        print(f"\nProfiler Traces (Backward):")
+        print(f"  BF16 Backward: {trace_path_bwd_bf16}")
+        print(f"  FP8 Backward:  {trace_path_bwd_fp8}")
         print(f"{'=' * 80}")
 
 

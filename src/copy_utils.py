@@ -1,6 +1,26 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Wentao Guo, Ted Zadouri, Tri Dao.
+
+"""Memory copy utilities for flash attention kernels.
+
+Provides helpers for global-to-shared, shared-to-register, and register-to-global
+memory transfers using TMA (Tensor Memory Access) and cp.async bulk operations.
+"""
+
 # pyre-ignore-all-errors
 import math
 from typing import Callable, Optional, Tuple, Type
@@ -26,6 +46,11 @@ def cvt_copy(
     ip=None,
     **kwargs,
 ) -> None:
+    """Copy with implicit dtype conversion.
+
+    If source and destination have different element types, converts in registers
+    before copying.
+    """
     assert (
         isinstance(src.iterator, cute.Pointer)
         and src.memspace == cute.AddressSpace.rmem
@@ -39,6 +64,7 @@ def cvt_copy(
 
 @dsl_user_op
 def load_s2r(src: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
+    """Load data from shared memory to registers using auto-vectorized copy."""
     dst = cute.make_fragment_like(src, src.element_type, loc=loc, ip=ip)
     cute.autovec_copy(src, dst, loc=loc, ip=ip)
     return dst
@@ -53,6 +79,10 @@ def get_copy_atom(
     loc=None,
     ip=None,
 ) -> cute.CopyAtom:
+    """Create a copy atom for the given dtype and copy width.
+
+    Supports synchronous and async (cp.async) modes.
+    """
     num_copy_bits = const_expr(min(128, num_copy_elems * dtype.width))
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
     return cute.make_copy_atom(copy_op, dtype, num_bits_per_copy=num_copy_bits)
@@ -62,6 +92,7 @@ def get_copy_atom(
 def make_tmem_copy(
     tmem_copy_atom: cute.CopyAtom, num_wg: int = 1, *, loc=None, ip=None
 ) -> cute.CopyAtom:
+    """Create a tiled copy for SM100 TMEM (tensor memory) transfers."""
     num_dp, num_bits, num_rep, _ = sm100_utils.get_tmem_copy_properties(tmem_copy_atom)
     assert num_dp == 32
     assert num_bits == 32
@@ -85,6 +116,7 @@ def copy(
     ip=None,
     **kwargs,
 ) -> None:
+    """Generic copy operation using an auto-created copy atom."""
     copy_atom = get_copy_atom(src.element_type, num_copy_elems, is_async)
     cute.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip, **kwargs)
 
@@ -95,6 +127,7 @@ def tiled_copy_1d(
     num_copy_elems: int = 1,
     is_async: bool = False,
 ) -> cute.TiledCopy:
+    """Create a 1D tiled copy with specified thread count and copy width."""
     num_copy_bits = num_copy_elems * dtype.width
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
     copy_atom = cute.make_copy_atom(copy_op, dtype, num_bits_per_copy=num_copy_bits)
@@ -109,6 +142,10 @@ def tiled_copy_2d(
     num_threads: int,
     is_async: bool = False,
 ) -> cute.TiledCopy:
+    """Create a 2D tiled copy with specified thread count.
+
+    Auto-selects copy width based on row size and alignment.
+    """
     num_copy_bits = math.gcd(major_mode_size, 128 // dtype.width) * dtype.width
     copy_elems = num_copy_bits // dtype.width
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
@@ -134,6 +171,7 @@ def atomic_add_fp32x4(
     loc=None,
     ip=None,
 ) -> None:
+    """Atomic 128-bit (4xF32) floating-point add to global memory using PTX red.global.add.v4.f32."""
     gmem_ptr_i64 = gmem_ptr.toint(loc=loc, ip=ip).ir_value()
     # cache_hint = cutlass.Int64(0x12F0000000000000)
     llvm.inline_asm(
@@ -200,6 +238,7 @@ def store_shared_remote_fp32x4(
     loc=None,
     ip=None,
 ) -> None:
+    """Store 4 F32 values to a remote CTA's shared memory with mbarrier completion using st.async.shared::cluster."""
     remote_smem_ptr_i32 = set_block_rank(
         smem_ptr, peer_cta_rank_in_cluster, loc=loc, ip=ip
     ).ir_value()
@@ -241,6 +280,7 @@ def cpasync_bulk_g2s(
     loc=None,
     ip=None,
 ):
+    """Bulk async copy from global to shared memory using cp.async.bulk with mbarrier."""
     gmem_ptr_i64 = gmem_ptr.toint(loc=loc, ip=ip).ir_value()
     smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
     mbar_ptr_i32 = tma_bar_ptr.toint(loc=loc, ip=ip).ir_value()
@@ -264,6 +304,7 @@ def cpasync_reduce_bulk_add_f32(
     loc=None,
     ip=None,
 ):
+    """Bulk async reduce-add from shared to global memory using cp.reduce.async.bulk.add.f32."""
     smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
     # cache_hint = cutlass.Int64(0x14F0000000000000)  # EVICT_LAST
     llvm.inline_asm(
@@ -286,6 +327,10 @@ def cpasync_bulk_get_copy_fn(
     single_stage: bool = False,
     **kwargs,
 ) -> Callable:
+    """Create a copy function for bulk async global-to-shared transfer.
+
+    Returns a callable that takes stage indices and tma_bar_ptr.
+    """
     # src_is_smem = const_expr(
     #     isinstance(src_tensor.iterator, cute.Pointer)
     #     and src_tensor.memspace == cute.AddressSpace.smem
@@ -323,6 +368,10 @@ def tma_get_copy_fn(
     single_stage: bool = False,
     **kwargs,
 ) -> Callable:
+    """Create a TMA copy function for global-to-shared or shared-to-global transfer.
+
+    Returns (copy_fn, smem_partition, gmem_partition).
+    """
     src_is_smem = const_expr(
         isinstance(src_tensor.iterator, cute.Pointer)
         and src_tensor.memspace == cute.AddressSpace.smem
@@ -359,6 +408,11 @@ def tma_get_copy_fn(
 
 
 def tma_producer_copy_fn(copy: Callable, pipeline: cutlass.pipeline.PipelineAsync):
+    """Wrap a TMA copy function with pipeline state handling.
+
+    Returns a callable that takes src_idx and producer_state.
+    """
+
     def copy_fn(src_idx, producer_state: cutlass.pipeline.PipelineState, **new_kwargs):
         copy(
             src_idx=src_idx,

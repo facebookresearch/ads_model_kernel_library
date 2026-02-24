@@ -1,6 +1,26 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Tri Dao.
+
+"""Pipeline management for asynchronous TMA data movement.
+
+Provides custom PipelineTmaAsync and PipelineTmaUmma implementations optimized
+for flash attention, with reduced signaling overhead.
+"""
+
 # pyre-ignore-all-errors
 # import math
 from dataclasses import dataclass
@@ -55,10 +75,9 @@ def _sync(group: Agent):
 
 
 class PipelineStateSimple:
-    """
-    Pipeline state contains an index and phase bit corresponding to the current position in the circular buffer.
-    Use a single Int32 to store both the index and phase bit, then we use divmod to get the
-    index and phase. If stages is a power of 2, divmod turns into bit twiddling.
+    """Lightweight pipeline state using a single Int32 to encode both buffer index and phase bit.
+
+    Supports power-of-2 stage counts with efficient modular arithmetic.
     """
 
     def __init__(self, stages: int, phase_index: Int32):
@@ -265,6 +284,12 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
 
 @dataclass(frozen=True)
 class PipelineTmaUmma(PipelineTmaUmmaOg):
+    """Pipeline for SM100 UMMA (Unified Matrix Multiply-Accumulate) with TMA.
+
+    Extends the base PipelineTmaUmma with a custom create method that handles
+    cluster setup.
+    """
+
     @staticmethod
     def create(
         *,

@@ -1,4 +1,17 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Imported from: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
@@ -27,7 +40,23 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from ads_mkl.ops.cute_dsl.gdpa.triton.math import (
+from torch._library.triton import capture_triton
+from torch.utils.flop_counter import (
+    _unpack_flash_attention_nested_shapes,
+    register_flop_formula,
+    sdpa_backward_flop_count,
+    sdpa_flop_count,
+)
+from triton.runtime.jit import JITFunction
+
+from ..utils.tma_utils import is_tma_supported
+from ..utils.utils import (
+    dump_kernel_info,
+    get_autotune_kernel,
+    get_num_sms,
+    should_use_i64_idx,
+)
+from .math import (
     activation_string_to_int,
     fast_gelu,
     fast_gelu_bf16,
@@ -55,39 +84,22 @@ from ads_mkl.ops.cute_dsl.gdpa.triton.math import (
     tanh_approx_bf16,
     tanh_approx_fp32,
 )
-from ads_mkl.ops.cute_dsl.gdpa.triton.register_helpers import (
-    custom_register_kernel,
-    custom_triton_op,
-)
-from ads_mkl.ops.cute_dsl.gdpa.utils.tma_utils import is_tma_supported
-from ads_mkl.ops.cute_dsl.gdpa.utils.utils import (
-    dump_kernel_info,
-    get_autotune_kernel,
-    get_num_sms,
-    should_use_i64_idx,
-)
-from torch._library.triton import capture_triton
-from torch.utils.flop_counter import (
-    _unpack_flash_attention_nested_shapes,
-    register_flop_formula,
-    sdpa_backward_flop_count,
-    sdpa_flop_count,
-)
-from triton.runtime.jit import JITFunction
+from .register_helpers import custom_register_kernel, custom_triton_op
 
 try:
     BF16_ATOMIC_ADD_SUPPORTED = torch.cuda.get_device_capability() >= (9, 0)
 except RuntimeError:  # Not running on GPU device
     BF16_ATOMIC_ADD_SUPPORTED = False
 
-from ads_mkl.ops.cute_dsl.gdpa.triton.hardware import (
+from triton import Config as triton_config
+
+from .hardware import (
     block_m_hw_supported,
     block_n_hw_supported,
     is_amd,
     stages_hw_supported,
     warps_hw_supported,
 )
-from triton import Config as triton_config
 
 
 def is_hip() -> bool:
@@ -219,7 +231,7 @@ def _gdpa_fwd_inner_ws(
         if activation_enum_int == 0:
             p = raw(qk)
         elif activation_enum_int == 1:
-            # activation = gelu TypeError("cannot convert JITFunction(ads_mkl.ops.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
+            # activation = gelu TypeError("cannot convert JITFunction(gdpa.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
             p = gelu(qk)
         elif activation_enum_int == 2:
             p = gelu_approx(qk)
@@ -310,10 +322,10 @@ def keep(conf: triton_config) -> bool:
     return True
 
 
-DISABLE_AUTOTUNE = os.environ.get("ADS_MKL_DISABLE_AUTOTUNE") == "1"
+DISABLE_AUTOTUNE = os.environ.get("GDPA_DISABLE_AUTOTUNE") == "1"
 
 # Manually autotuned configs for faster autotuning
-AUTOTUNE_CONFIG_SET = os.environ.get("ADS_MKL_AUTOTUNE_CONFIG_SET", "default")
+AUTOTUNE_CONFIG_SET = os.environ.get("GDPA_AUTOTUNE_CONFIG_SET", "default")
 
 if DISABLE_AUTOTUNE:
     configs = [
@@ -1284,7 +1296,7 @@ def _gdpa_bwd_dkdv(
             if activation_enum_int == 0:
                 pT = raw_grad(pT)
             elif activation_enum_int == 1:
-                # activation = gelu TypeError("cannot convert JITFunction(ads_mkl.ops.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
+                # activation = gelu TypeError("cannot convert JITFunction(gdpa.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
                 pT = gelu_grad(pT)
             elif (activation_enum_int == 2) or (activation_enum_int == 3):
                 pT = (
@@ -1447,7 +1459,7 @@ def _gdpa_bwd_dq(
             if activation_enum_int == 0:
                 p = raw_grad(qk)
             elif activation_enum_int == 1:
-                # activation = gelu TypeError("cannot convert JITFunction(ads_mkl.ops.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
+                # activation = gelu TypeError("cannot convert JITFunction(gdpa.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
                 p = gelu_grad(qk)
             elif activation_enum_int == 2:
                 p = gelu_approx_grad(qk)
@@ -2746,7 +2758,7 @@ def _gdpa_bwd_persistent(
         tile_idx += num_progs
 
 
-@custom_triton_op("ads_mkl::generalized_dot_product_attention", mutates_args=())
+@custom_triton_op("gdpa::generalized_dot_product_attention", mutates_args=())
 def generalized_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -3109,9 +3121,7 @@ def _generalized_dot_product_attention_setup_context(
     ctx.sort_by_seq_length = sort_by_seq_length
 
 
-@custom_triton_op(
-    "ads_mkl::generalized_dot_product_attention_backward", mutates_args=()
-)
+@custom_triton_op("gdpa::generalized_dot_product_attention_backward", mutates_args=())
 def generalized_dot_product_attention_backward(
     do: torch.Tensor,
     q: torch.Tensor,
@@ -3497,7 +3507,7 @@ if not isinstance(
 
 
 @torch.jit.script_if_tracing
-@custom_register_kernel("ads_mkl::generalized_dot_product_attention", "cpu")
+@custom_register_kernel("gdpa::generalized_dot_product_attention", "cpu")
 def cpu_generalized_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -3581,7 +3591,7 @@ def cpu_generalized_dot_product_attention(
     return o
 
 
-@custom_register_kernel("ads_mkl::generalized_dot_product_attention_backward", "cpu")
+@custom_register_kernel("gdpa::generalized_dot_product_attention_backward", "cpu")
 def cpu_generalized_dot_product_attention_backward(
     do: torch.Tensor,
     q: torch.Tensor,
@@ -3649,9 +3659,7 @@ def _unpack_nested_shapes_meta(
     return
 
 
-@register_flop_formula(
-    torch.ops.ads_mkl.generalized_dot_product_attention, get_raw=True
-)
+@register_flop_formula(torch.ops.gdpa.generalized_dot_product_attention, get_raw=True)
 def generalized_dot_product_attention_forward_flop(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -3735,7 +3743,7 @@ def generalized_dot_product_attention_forward_flop(
 
 
 @register_flop_formula(
-    torch.ops.ads_mkl.generalized_dot_product_attention_backward, get_raw=True
+    torch.ops.gdpa.generalized_dot_product_attention_backward, get_raw=True
 )
 def generalized_dot_product_attention_backward_flop(
     do: torch.Tensor,
@@ -3893,7 +3901,7 @@ def generalized_dot_product_attention(
     query = expect_contiguous(query)
     key = expect_contiguous(key)
     value = expect_contiguous(value)
-    return torch.ops.ads_mkl.generalized_dot_product_attention(
+    return torch.ops.gdpa.generalized_dot_product_attention(
         query=query,
         key=key,
         value=value,

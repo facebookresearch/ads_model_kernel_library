@@ -1,19 +1,41 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Tri Dao.
+"""Fast math utilities for GPU kernels.
+
+Provides count-leading-zeros (clz), fast integer divmod via multiply-high,
+and log2 computation.
+"""
+
 # pyre-ignore-all-errors
 from typing import Tuple
 
 import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, Uint32
-from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import dsl_user_op, T
 
 
 @cute.jit
 def clz(x: Int32) -> Int32:
+    """Count leading zeros in a 32-bit integer.
+
+    Returns the number of zero bits before the first set bit (32 if input is 0).
+    """
     # for i in cutlass.range_constexpr(32):
     #     if (1 << (31 - i)) & x:
     #         return Int32(i)
@@ -29,12 +51,20 @@ def clz(x: Int32) -> Int32:
 
 
 def find_log2(x: Int32) -> Int32:
+    """Compute ceil(log2(x)).
+
+    Returns the smallest n such that 2^n >= x.
+    """
     a: Int32 = Int32(31 - clz(x))
     return a + ((x & (x - 1)) != 0)  # Round up, add 1 if not a power of 2.
 
 
 @dsl_user_op
 def umulhi(a: Int32, b: Int32, *, loc=None, ip=None) -> Uint32:
+    """Unsigned multiply-high: returns the upper 32 bits of the 64-bit product a*b.
+
+    Uses PTX mul.hi.u32 instruction.
+    """
     return Uint32(
         llvm.inline_asm(
             T.i32(),
@@ -49,8 +79,20 @@ def umulhi(a: Int32, b: Int32, *, loc=None, ip=None) -> Uint32:
 
 
 class FastDivmod:
+    """Fast integer division and modulo using multiply-high.
+
+    Precomputes a multiplier and shift on the host to replace expensive division
+    with a multiply+shift on the GPU.
+    """
+
     def __init__(
-        self, divisor: Int32, multipler: Uint32, shift_right: Uint32, *, loc=None, ip=None
+        self,
+        divisor: Int32,
+        multipler: Uint32,
+        shift_right: Uint32,
+        *,
+        loc=None,
+        ip=None,
     ):
         self.divisor = divisor
         self.multiplier = multipler

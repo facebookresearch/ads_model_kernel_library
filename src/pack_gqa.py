@@ -1,18 +1,41 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Tri Dao.
+"""Grouped-Query Attention (GQA) packing utilities for flash attention.
+
+When multiple query heads share a single KV head, this module packs them into a
+single tile so that KV data is loaded only once per group, reducing memory bandwidth.
+"""
+
 # pyre-ignore-all-errors
 import math
 import operator
 
+import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
 import cutlass
 import cutlass.cute as cute
 
-import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
-
 
 class PackGQA:
+    """Handles pointer computation and data movement for GQA-packed tiles.
+
+    Maps linear indices within a packed tile to the correct (head, sequence) position
+    in the Q and O tensors.
+    """
+
     def __init__(
         self,
         m_block_size: cutlass.Constexpr[int],
@@ -35,6 +58,11 @@ class PackGQA:
         threads_per_row: cutlass.Constexpr[int],
         num_threads: cutlass.Constexpr[int],
     ):
+        """Compute per-thread global memory pointers for GQA-packed access.
+
+        Converts linear row indices within the packed tile to (head_idx, seq_idx) pairs
+        and returns the corresponding element pointers.
+        """
         num_ptr_per_thread = cute.ceil_div(cute.size(cRows), threads_per_row)
         tPrPtr = cute.make_fragment(num_ptr_per_thread, cutlass.Int64)
         for i in cutlass.range_constexpr(num_ptr_per_thread):
@@ -55,6 +83,10 @@ class PackGQA:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
     ):
+        """Load query tensor from global memory into shared memory with GQA packing.
+
+        Each row in the shared memory tile maps to a different (head, sequence) pair.
+        """
         gmem_thr_copy = gmem_tiled_copy.get_slice(tidx)
         cQ = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
         tQsQ = gmem_thr_copy.partition_D(sQ)
@@ -63,19 +95,27 @@ class PackGQA:
         tQpQ = utils.predicate_k(tQcQ, limit=mQ.shape[1])
         tQcQ_row = tQcQ[0, None, 0]
         threads_per_row = gmem_tiled_copy.layout_tv_tiled.shape[0][0]
-        assert cute.arch.WARP_SIZE % threads_per_row == 0, "threads_per_row must divide WARP_SIZE"
+        assert cute.arch.WARP_SIZE % threads_per_row == 0, (
+            "threads_per_row must divide WARP_SIZE"
+        )
         num_threads = gmem_tiled_copy.size
-        tPrQPtr = self.compute_ptr(mQ[None, 0], tQcQ_row, tidx, block, threads_per_row, num_threads)
+        tPrQPtr = self.compute_ptr(
+            mQ[None, 0], tQcQ_row, tidx, block, threads_per_row, num_threads
+        )
         for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
             q_ptr_i64 = utils.shuffle_sync(
-                tPrQPtr[m // threads_per_row], m % threads_per_row, width=threads_per_row
+                tPrQPtr[m // threads_per_row],
+                m % threads_per_row,
+                width=threads_per_row,
             )
             q_gmem_ptr = cute.make_ptr(
                 mQ.element_type, q_ptr_i64, cute.AddressSpace.gmem, assumed_align=16
             )
             if (
                 t0QcQ[0, m, 0][0]
-                < seqlen * self.qhead_per_kvhead - block * self.m_block_size - tQcQ_row[0][0]
+                < seqlen * self.qhead_per_kvhead
+                - block * self.m_block_size
+                - tQcQ_row[0][0]
             ):
                 mQ_cur = cute.make_tensor(q_gmem_ptr, (self.head_dim_padded,))
                 elems_per_load = cute.size(tQsQ.shape[0][0])
@@ -86,7 +126,9 @@ class PackGQA:
                         gmem_thr_copy,
                         mQ_cur_copy[None, ki],
                         tQsQ[None, m, k],
-                        pred=tQpQ[None, m, k] if cutlass.const_expr(self.check_hdim_oob) else None,
+                        pred=tQpQ[None, m, k]
+                        if cutlass.const_expr(self.check_hdim_oob)
+                        else None,
                     )
             # We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
 
@@ -100,16 +142,21 @@ class PackGQA:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
     ):
+        """Store log-sum-exp values to global memory from GQA-packed accumulator layout."""
         thr_mma = tiled_mma.get_slice(tidx)
         caccO = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
         taccOcO = thr_mma.partition_C(caccO)
         taccOcO_row = utils.make_acc_tensor_mn_view(taccOcO)[None, 0]
         assert cute.size(tLSErLSE) == cute.size(taccOcO_row)
         threads_per_row = tiled_mma.tv_layout_C.shape[0][0]
-        assert cute.arch.WARP_SIZE % threads_per_row == 0, "threads_per_row must divide WARP_SIZE"
+        assert cute.arch.WARP_SIZE % threads_per_row == 0, (
+            "threads_per_row must divide WARP_SIZE"
+        )
         assert cute.size(tLSErLSE) <= threads_per_row
         num_threads = tiled_mma.size
-        tPrLSEPtr = self.compute_ptr(mLSE, taccOcO_row, tidx, block, threads_per_row, num_threads)
+        tPrLSEPtr = self.compute_ptr(
+            mLSE, taccOcO_row, tidx, block, threads_per_row, num_threads
+        )
         for m in cutlass.range_constexpr(cute.size(tLSErLSE)):
             lse_ptr_i64 = utils.shuffle_sync(
                 tPrLSEPtr[m // threads_per_row],
@@ -135,6 +182,7 @@ class PackGQA:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
     ):
+        """Store output tensor from registers to global memory with GQA-packed addressing."""
         gmem_thr_copy = gmem_tiled_copy.get_slice(tidx)
         cO = cute.make_identity_tensor((self.m_block_size, self.head_dim_padded))
         tOcO = gmem_thr_copy.partition_S(cO)
@@ -142,19 +190,27 @@ class PackGQA:
         tOpO = utils.predicate_k(tOcO, limit=mO.shape[1])
         tOcO_row = tOcO[0, None, 0]
         threads_per_row = gmem_tiled_copy.layout_tv_tiled.shape[0][0]
-        assert cute.arch.WARP_SIZE % threads_per_row == 0, "threads_per_row must divide WARP_SIZE"
+        assert cute.arch.WARP_SIZE % threads_per_row == 0, (
+            "threads_per_row must divide WARP_SIZE"
+        )
         num_threads = gmem_tiled_copy.size
-        tPrOPtr = self.compute_ptr(mO[None, 0], tOcO_row, tidx, block, threads_per_row, num_threads)
+        tPrOPtr = self.compute_ptr(
+            mO[None, 0], tOcO_row, tidx, block, threads_per_row, num_threads
+        )
         for m in cutlass.range_constexpr(cute.size(tOrO.shape[1])):
             o_ptr_i64 = utils.shuffle_sync(
-                tPrOPtr[m // threads_per_row], m % threads_per_row, width=threads_per_row
+                tPrOPtr[m // threads_per_row],
+                m % threads_per_row,
+                width=threads_per_row,
             )
             o_gmem_ptr = cute.make_ptr(
                 mO.element_type, o_ptr_i64, cute.AddressSpace.gmem, assumed_align=16
             )
             if (
                 t0OcO[0, m, 0][0]
-                < seqlen * self.qhead_per_kvhead - block * self.m_block_size - tOcO_row[0][0]
+                < seqlen * self.qhead_per_kvhead
+                - block * self.m_block_size
+                - tOcO_row[0][0]
             ):
                 mO_cur = cute.make_tensor(o_gmem_ptr, (self.head_dim_padded,))
                 elems_per_load = cute.size(tOrO.shape[0][0])
@@ -165,5 +221,7 @@ class PackGQA:
                         gmem_thr_copy,
                         tOrO[None, m, k],
                         mO_cur_copy[None, ki],
-                        pred=tOpO[None, m, k] if cutlass.const_expr(self.check_hdim_oob) else None,
+                        pred=tOpO[None, m, k]
+                        if cutlass.const_expr(self.check_hdim_oob)
+                        else None,
                     )

@@ -1,6 +1,26 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Tri Dao.
+"""Attention masking utilities for flash attention kernels.
+
+Supports causal, local (sliding window), sequence length, and FlexAttention
+mask_mod masking patterns for both SM90 (Hopper) and SM100 (Blackwell)
+architectures.
+"""
+
 # pyre-ignore-all-errors
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -15,6 +35,11 @@ from cutlass import const_expr, Float32, Int32
 def mask_r2p(
     X: cute.Tensor, col_limit: Int32, arch: int = 90, rank1: bool = False
 ) -> None:
+    """Apply column-wise masking using the R2P (register-to-predicate) instruction pattern.
+
+    Zeroes out elements beyond col_limit. Uses bit manipulation that compiles
+    to efficient PTX R2P instructions.
+    """
     # Bit manipulation, compiles down to the R2P instruction
     # For sm100: we know that tScS_t2r[i][1] == i, for the particular tmem copy atom we're using.
     # For sm90: instead of comparing limit to 0, 1, 8, 9, 16, 17, ...,
@@ -49,6 +74,10 @@ def mask_r2p(
 def mask_r2p_transposed_inbound_check(
     X: cute.Tensor, row_limit_top: Int32, num_rep: int, num_wg: int = 2
 ) -> None:
+    """Apply transposed row-wise masking with in-bound checking for SM100 backward pass.
+
+    Zeroes out elements beyond the row limit.
+    """
     # Bit manipulation, compiles down to the R2P instruction
     # For sm100: we know that tScS_t2r[i][0] has the form 0, 1, ..., 31, 64, ..., 127
     # or 0, 1, ..., 15, 32, ..., 47, 64, ...
@@ -71,6 +100,10 @@ def mask_r2p_transposed_inbound_check(
 
 @cute.jit
 def mask_r2p_transposed(X: cute.Tensor, row_limit_top: Int32, num_rep: int) -> None:
+    """Apply transposed row-wise masking for SM100 backward pass causal masking.
+
+    Sets out-of-bound elements to -inf.
+    """
     # Bit manipulation, compiles down to the R2P instruction
     # For sm100: we know that tScS_t2r[i][0] has the form 0, 1, ..., 31, 64, ..., 127
     # or 0, 1, ..., 15, 32, ..., 47, 64, ...
@@ -98,6 +131,12 @@ def mask_r2p_transposed(X: cute.Tensor, row_limit_top: Int32, num_rep: int) -> N
 
 @dataclass(frozen=True)
 class AttentionMask:
+    """Configurable attention mask supporting causal, local (sliding window), sequence length
+    bounds, and FlexAttention mask_mod patterns.
+
+    Handles both standard (Q@K^T) and transposed (K@Q^T) attention score layouts.
+    """
+
     tile_m: cutlass.Constexpr[int]
     tile_n: cutlass.Constexpr[int]
     seqlen_q: Int32
@@ -124,6 +163,11 @@ class AttentionMask:
         mask_mod: cutlass.Constexpr[Optional[Callable]] = None,
         buffers: Optional[list[cute.Tensor]] = None,
     ) -> None:
+        """Apply attention mask to SM90 accumulator.
+
+        Supports causal, local, seqlen, and custom mask_mod patterns.
+        Sets masked positions to -inf.
+        """
         assert not (mask_causal and mask_local), (
             "mask_causal and mask_local cannot be both True"
         )
@@ -368,6 +412,10 @@ class AttentionMask:
         mask_causal: cutlass.Constexpr[bool],
         mask_local: cutlass.Constexpr[bool] = False,
     ) -> None:
+        """Apply attention mask to SM100 (Blackwell) accumulator using tmem layout.
+
+        Supports causal and local masking with R2P optimization.
+        """
         assert not (mask_causal and mask_local), (
             "mask_causal and mask_local cannot be both True"
         )

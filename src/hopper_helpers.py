@@ -1,7 +1,20 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Tri Dao.
+
 # pyre-ignore-all-errors
 import cutlass
 import cutlass.cute as cute
@@ -20,7 +33,15 @@ def gemm(
     swap_AB: cutlass.Constexpr[bool] = False,
 ) -> None:
     if cutlass.const_expr(swap_AB):
-        gemm(tiled_mma, acc, tCrB, tCrA, zero_init=zero_init, wg_wait=wg_wait, swap_AB=False)
+        gemm(
+            tiled_mma,
+            acc,
+            tCrB,
+            tCrA,
+            zero_init=zero_init,
+            wg_wait=wg_wait,
+            swap_AB=False,
+        )
     else:
         warpgroup.fence()
         # We make a new mma_atom since we'll be modifying its attribute (accumulate).

@@ -1,17 +1,32 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # A reimplementation of https://github.com/Dao-AILab/flash-attention/blob/main/hopper/flash_bwd_preprocess_kernel.h
 # from Cutlass C++ to Cute-DSL.
+
 # pyre-ignore-all-errors
 import math
 import operator
 from typing import Callable, Optional, Type
 
+import ads_mkl.ops.cute_dsl.gdpa.src.copy_utils as copy_utils
+import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-from ads_mkl.ops.cute_dsl.gdpa.src import copy_utils, utils
 from ads_mkl.ops.cute_dsl.gdpa.src.seqlen_info import SeqlenInfoQK
 from ads_mkl.ops.cute_dsl.gdpa.src.tile_scheduler import (
     ParamsBase,

@@ -1,7 +1,25 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Tri Dao.
+"""Tile schedulers for flash attention kernels.
+
+Maps GPU thread blocks to (batch, head, tile) coordinates. Supports fixed-length,
+variable-length, persistent, and load-balanced scheduling.
+"""
+
 # pyre-ignore-all-errors
 from dataclasses import dataclass, fields
 from typing import Optional, Tuple
@@ -15,6 +33,12 @@ from cutlass import Int32
 
 @dataclass
 class ParamsBase:
+    """Base class for scheduler parameters with MLIR serialization support.
+
+    Provides __extract_mlir_values__ and __new_from_mlir_values__ for passing
+    parameters to compiled GPU kernels.
+    """
+
     def __extract_mlir_values__(self):
         all_fields = [getattr(self, field.name) for field in fields(self)]
         non_constexpr_fields = [
@@ -47,6 +71,11 @@ class ParamsBase:
 
 @dataclass
 class TileSchedulerArguments(ParamsBase):
+    """Arguments for constructing tile schedulers.
+
+    Contains sequence information, tile shapes, and optional variable-length tensors.
+    """
+
     num_block: Int32
     num_head: Int32
     num_batch: Int32
@@ -72,6 +101,11 @@ class TileSchedulerArguments(ParamsBase):
 
 
 class SingleTileScheduler:
+    """Simple tile scheduler that maps each CUDA block to one (block, head, batch) tile.
+
+    Grid shape equals (num_blocks, num_heads, num_batches).
+    """
+
     @dataclass
     class Params(ParamsBase):
         num_block: Int32
@@ -142,6 +176,12 @@ class SingleTileScheduler:
 
 
 class StaticPersistentTileScheduler:
+    """Persistent tile scheduler that maps a fixed number of CTAs (equal to SM count) to tiles
+    using round-robin assignment.
+
+    Each CTA processes multiple tiles sequentially.
+    """
+
     @dataclass
     class Params(ParamsBase):
         num_block_divmod: FastDivmod
@@ -228,6 +268,12 @@ class StaticPersistentTileScheduler:
 
 
 class SingleTileLPTScheduler:
+    """Longest-Processing-Time-First scheduler.
+
+    Orders tiles so that larger workloads are processed first, improving load balance.
+    Uses L2 cache swizzling to co-schedule heads that share KV cache.
+    """
+
     @dataclass
     class Params(ParamsBase):
         total_blocks: Int32
@@ -354,6 +400,12 @@ class SingleTileLPTScheduler:
 
 
 class SingleTileVarlenScheduler:
+    """Variable-length sequence scheduler.
+
+    Uses warp-level prefix sums to efficiently map tile indices to (batch, head, block)
+    coordinates without precomputation on the host.
+    """
+
     @dataclass
     class Params(ParamsBase):
         num_head: Int32
@@ -582,6 +634,12 @@ class SingleTileVarlenScheduler:
 
 
 class SingleTileVarlenSchedulerSimple:
+    """Simple variable-length scheduler using 3D grid (blocks_m, num_head, num_batch).
+
+    Each block checks if its tile index falls within the valid sequence length,
+    skipping invalid tiles.
+    """
+
     @dataclass
     class Params(ParamsBase):
         num_head: Int32
@@ -724,6 +782,11 @@ class SingleTileVarlenSchedulerSimple:
 
 
 class SingleTileVarlenSchedulerPersistent:
+    """Persistent variable-length scheduler using precomputed tile-to-batch/head/block mappings.
+
+    Supports multiple tiles per CTA with round-robin assignment.
+    """
+
     @dataclass
     class Params(ParamsBase):
         num_head: Int32

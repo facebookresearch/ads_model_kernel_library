@@ -1,16 +1,33 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
+
 # pyre-ignore-all-errors
 import math
 from functools import partial
 from typing import Callable, Optional
 
+import ads_mkl.ops.cute_dsl.gdpa.src.barrier as barrier
+import ads_mkl.ops.cute_dsl.gdpa.src.copy_utils as copy_utils
+import ads_mkl.ops.cute_dsl.gdpa.src.pipeline as pipeline
+import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.utils.blackwell_helpers as sm100_utils_basic
-from ads_mkl.ops.cute_dsl.gdpa.src import barrier, copy_utils, pipeline, utils
 from ads_mkl.ops.cute_dsl.gdpa.src.activation_utils import Gelu, Relu
 from ads_mkl.ops.cute_dsl.gdpa.src.blackwell_helpers import (  # noqa
     gemm_ptx_w_idx,

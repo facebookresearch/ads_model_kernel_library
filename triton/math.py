@@ -1,6 +1,17 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-
-# pyre-unsafe
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 This file defines common math functions, sometimes relying on optimized PTX for performance. Note that the functions relying on PTX
@@ -13,8 +24,9 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from ads_mkl.ops.cute_dsl.gdpa.triton.hardware import is_amd
 from torch._inductor.runtime.triton_helpers import libdevice
+
+from .hardware import is_amd
 
 try:
     from triton.language.extra.libdevice import fast_dividef, fast_expf
@@ -22,7 +34,7 @@ except ImportError:
     try:
         from triton.language.extra.cuda.libdevice import fast_dividef, fast_expf
     except ImportError:
-        from triton.language.math import fast_dividef, fast_expf  # pyre-fixme[21]
+        from triton.language.math import fast_dividef, fast_expf  # type: ignore
 
 
 # Don't change the order of the enum values, as they are used to index
@@ -93,8 +105,7 @@ def get_triton_activation_bwd_kernel(activation: Optional[Activation]):
     )
 
 
-# pyre-fixme[6]: For 1st argument expected `Iterable[_T]` but got `Type[Activation]`.
-activation_to_int = {act: i for i, act in enumerate(Activation)}
+activation_to_int = {act: i for i, act in enumerate(Activation)}  # type: ignore
 int_to_activation = {i: act for act, i in activation_to_int.items()}
 
 
@@ -141,7 +152,7 @@ def cosh(x):
 @triton.jit  # pragma: no cover
 def relu(x: tl.tensor) -> tl.tensor:
     zero = 0.0
-    return tl.where(x >= 0, x, zero.to(x.dtype))  # pyre-fixme[16]
+    return tl.where(x >= 0, x, zero.to(x.dtype))  # type: ignore
 
 
 @triton.jit  # pragma: no cover
