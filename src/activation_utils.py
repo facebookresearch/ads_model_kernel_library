@@ -1,6 +1,18 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # pyre-ignore-all-errors
 import math
 import operator
@@ -8,12 +20,11 @@ from typing import Tuple
 
 import cutlass
 import cutlass.cute as cute
-
-from cutlass import Float32, Int32, Uint8, Uint32, Int64, const_expr
-from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass._mlir.dialects import nvvm, llvm, arith, vector
+from ads_mkl.ops.cute_dsl.gdpa.src.utils import mul_packed_f32x2, sub_packed_f32x2
+from cutlass import const_expr, Float32, Int32, Int64, Uint32, Uint8
+from cutlass._mlir.dialects import arith, llvm, nvvm, vector
 from cutlass.cute.runtime import from_dlpack
-from ads_mkl.ops.cute_dsl.gdpa.src.utils import sub_packed_f32x2, mul_packed_f32x2
+from cutlass.cutlass_dsl import dsl_user_op, T
 
 # MXFP8 block scaling constants
 E4M3_MAX_NORM_RCP = 1.0 / 448.0  # FP8 E4M3 max value reciprocal
@@ -22,8 +33,13 @@ E8M0_NEUTRAL_SCALE = 127  # Scale = 1.0 in E8M0 format (2^(127-127) = 2^0 = 1.0)
 
 @dsl_user_op
 def pack_4xu8_to_u32(
-    b0: Uint8, b1: Uint8, b2: Uint8, b3: Uint8,
-    *, loc=None, ip=None,
+    b0: Uint8,
+    b1: Uint8,
+    b2: Uint8,
+    b3: Uint8,
+    *,
+    loc=None,
+    ip=None,
 ) -> Uint32:
     """Pack 4 Uint8 values into a Uint32 (little-endian: b0 is lowest byte)."""
     return Uint32(
@@ -155,11 +171,7 @@ def max3_f32(
                 Float32(b).ir_value(loc=loc, ip=ip),
                 Float32(c).ir_value(loc=loc, ip=ip),
             ],
-            "{\n"
-            ".reg .f32 tmp;\n"
-            "max.f32 tmp, $2, $3;\n"
-            "max.f32 $0, $1, tmp;\n"
-            "}\n",
+            "{\n.reg .f32 tmp;\nmax.f32 tmp, $2, $3;\nmax.f32 $0, $1, tmp;\n}\n",
             "=f,f,f,f",
             has_side_effects=False,
             is_align_stack=False,
@@ -395,7 +407,9 @@ def cvt_8x_e4m3(
 def fused_amax_to_e8m0_scale_f32(
     amax: Float32,
     max_norm_rcp: Float32,
-    *, loc=None, ip=None,
+    *,
+    loc=None,
+    ip=None,
 ) -> Tuple[Uint8, Float32]:
     """
     Convert F32 AMAX to E8M0 scale and inverse scale.
@@ -471,6 +485,7 @@ class Relu:
     ReLU: max(0, x)
     ReLU gradient: 1 if x >= 0, else 0
     """
+
     def __init__(
         self,
         scale_qk: Float32,
@@ -490,7 +505,9 @@ class Relu:
         return (step_f32(x[0]), step_f32(x[1]))
 
     @cute.jit
-    def activation_and_gradient_relu(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32, Float32, Float32]:
+    def activation_and_gradient_relu(
+        self, x: Tuple[Float32, Float32]
+    ) -> Tuple[Float32, Float32, Float32, Float32]:
         """Compute both ReLU activation and gradient simultaneously.
 
         Returns (act_x0, act_x1, grad_x0, grad_x1).
@@ -509,7 +526,9 @@ class Relu:
         e2e_frg_limit: cutlass.Constexpr[int] = 1,
     ):
         """Apply ReLU activation and convert to target dtype (for forward pass)."""
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         frg_tile = 32
         assert frg_tile % 2 == 0
         frg_cnt = cute.size(acc_S_row) // frg_tile
@@ -538,18 +557,16 @@ class Relu:
         e2e_frg_limit: cutlass.Constexpr[int] = 1,
     ):
         """Apply ReLU activation and compute gradient, convert to target dtype (for backward pass)."""
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         frg_tile = 32
         assert frg_tile % 2 == 0
         frg_cnt = cute.size(acc_S_row) // frg_tile
         assert cute.size(acc_S_row) % frg_tile == 0
         acc_S_row_frg = cute.logical_divide(acc_S_row, cute.make_layout(frg_tile))
-        acc_P_row_frg = cute.logical_divide(
-            acc_P_row, cute.make_layout(frg_tile)
-        )
-        acc_dS_row_frg = cute.logical_divide(
-            acc_dS_row, cute.make_layout(frg_tile)
-        )
+        acc_P_row_frg = cute.logical_divide(acc_P_row, cute.make_layout(frg_tile))
+        acc_dS_row_frg = cute.logical_divide(acc_dS_row, cute.make_layout(frg_tile))
         acc_P_row_f16_frg = cute.logical_divide(
             acc_P_row_f16, cute.make_layout(frg_tile)
         )
@@ -557,8 +574,15 @@ class Relu:
         for j in cutlass.range_constexpr(frg_cnt):
             for k in cutlass.range_constexpr(0, cute.size(acc_S_row_frg, mode=[0]), 2):
                 s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
-                acc_P_row_frg[k, j], acc_P_row_frg[k + 1, j], acc_dS_row_frg[k, j], acc_dS_row_frg[k + 1, j] = self.activation_and_gradient_relu(s_f2)
-            acc_P_row_f16_frg[None, j].store(acc_P_row_frg[None, j].load().to(acc_P_row_f16_frg.element_type))
+                (
+                    acc_P_row_frg[k, j],
+                    acc_P_row_frg[k + 1, j],
+                    acc_dS_row_frg[k, j],
+                    acc_dS_row_frg[k + 1, j],
+                ) = self.activation_and_gradient_relu(s_f2)
+            acc_P_row_f16_frg[None, j].store(
+                acc_P_row_frg[None, j].load().to(acc_P_row_f16_frg.element_type)
+            )
 
     @cute.jit
     def relu_and_convert_blockscaled(
@@ -765,16 +789,37 @@ class Gelu:
         self.c_gamma = (Float32(0.1070322243), Float32(0.1070322243))
         self.c_sqrt_2 = (Float32(0.7071067811865475), Float32(0.7071067811865475))
         self.c_sqrt_2pi = (Float32(1.1283791670955126), Float32(1.1283791670955126))
-        self.c_minus_1_div_3 = (Float32(-0.3333333333333333), Float32(-0.3333333333333333))
+        self.c_minus_1_div_3 = (
+            Float32(-0.3333333333333333),
+            Float32(-0.3333333333333333),
+        )
         self.c_1_div_10 = (Float32(0.1), Float32(0.1))
         self.c_taylor_c2 = (Float32(0.3989422804014327), Float32(0.3989422804014327))
-        self.c_taylor_c4 = (Float32(-0.06649038006690543), Float32(-0.06649038006690543))
+        self.c_taylor_c4 = (
+            Float32(-0.06649038006690543),
+            Float32(-0.06649038006690543),
+        )
         self.c_taylor_c6 = (Float32(0.00997355701003582), Float32(0.00997355701003582))
-        self.c_taylor_c8   = (Float32(-0.001187328215480045), Float32(-0.001187328215480045))
-        self.c_taylor_c10  = (Float32(0.0001171766272366646),Float32(0.0001171766272366646))
-        self.c_talyor_2_mul_c2 = (Float32(self.c_taylor_c2[0] * self.c_two[0]), Float32(self.c_taylor_c2[1] * self.c_two[1]))
-        self.c_taylor_4_mul_c4 = (Float32(self.c_taylor_c4[0] * self.c_four[0]), Float32(self.c_taylor_c4[1] * self.c_four[1]))
-        self.c_taylor_6_mul_c6 = (Float32(self.c_taylor_c6[0] * self.c_six[0]), Float32(self.c_taylor_c6[1] * self.c_six[1]))
+        self.c_taylor_c8 = (
+            Float32(-0.001187328215480045),
+            Float32(-0.001187328215480045),
+        )
+        self.c_taylor_c10 = (
+            Float32(0.0001171766272366646),
+            Float32(0.0001171766272366646),
+        )
+        self.c_talyor_2_mul_c2 = (
+            Float32(self.c_taylor_c2[0] * self.c_two[0]),
+            Float32(self.c_taylor_c2[1] * self.c_two[1]),
+        )
+        self.c_taylor_4_mul_c4 = (
+            Float32(self.c_taylor_c4[0] * self.c_four[0]),
+            Float32(self.c_taylor_c4[1] * self.c_four[1]),
+        )
+        self.c_taylor_6_mul_c6 = (
+            Float32(self.c_taylor_c6[0] * self.c_six[0]),
+            Float32(self.c_taylor_c6[1] * self.c_six[1]),
+        )
 
     @cute.jit
     def gelu_tanh(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32]:
@@ -794,7 +839,9 @@ class Gelu:
         return (t_x, t_y)
 
     @cute.jit
-    def activation_and_gradient_fast_gelu(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32, Float32, Float32]:
+    def activation_and_gradient_fast_gelu(
+        self, x: Tuple[Float32, Float32]
+    ) -> Tuple[Float32, Float32, Float32, Float32]:
         tanh = self.gelu_tanh(x)
         tanh_1 = cute.arch.add_packed_f32x2(tanh, self.c_one)
         half_x = cute.arch.mul_packed_f32x2(x, self.c_half)
@@ -814,7 +861,6 @@ class Gelu:
     @cute.jit
     def fast_gelu(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32]:
         # TODO: Seems like the complier may be able to handle this, without explicitly calling packed_f32x2:
-        # Ref: https://www.internalfb.com/code/fbsource/fbcode/ads_mkl/ops/cute_dsl/quack/quack/utils.py?lines=436
 
         # x * 0.5 * (1+tanh)
         tanh = self.gelu_tanh(x)
@@ -826,7 +872,6 @@ class Gelu:
     @cute.jit
     def grad_fast_gelu(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32]:
         # TODO: Seems like the complier may be able to handle this, without explicitly calling packed_f32x2:
-        # Ref: https://www.internalfb.com/code/fbsource/fbcode/ads_mkl/ops/cute_dsl/quack/quack/utils.py?lines=436
 
         # 0.5 * x * ((1 - tanh²) * (0.7978845608 + 0.1070322243 × x²)) + 0.5 * (1+ tanh)
         tanh = self.gelu_tanh(x)
@@ -844,12 +889,16 @@ class Gelu:
         return out
 
     @cute.jit
-    def activation_and_gradient_gelu_taylor_deg6(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32, Float32, Float32]:
+    def activation_and_gradient_gelu_taylor_deg6(
+        self, x: Tuple[Float32, Float32]
+    ) -> Tuple[Float32, Float32, Float32, Float32]:
         # act: 0.5*x + x2*(c2 + x2*(c4 + x2*c6))
         #     = 0.5 * x + x^2 * c2 + x^4 * c4 + x^6 * c6
         x2 = cute.arch.mul_packed_f32x2(x, x)
         x_half = cute.arch.mul_packed_f32x2(x, self.c_half)
-        tmp = cute.arch.fma_packed_f32x2(x2, self.c_taylor_c6, self.c_taylor_c4)  # c4 + x2*c6
+        tmp = cute.arch.fma_packed_f32x2(
+            x2, self.c_taylor_c6, self.c_taylor_c4
+        )  # c4 + x2*c6
         tmp = cute.arch.fma_packed_f32x2(x2, tmp, self.c_taylor_c2)  # c2 + x2*tmp
 
         # grad: 0.5 + (2x * c2) + (4x * x^2 * c4) + (6x * x^4 * c6)
@@ -857,16 +906,22 @@ class Gelu:
         #     = 0.5 + (2*c2 * x) + (4*c4 * x^3) + (6*c6 * x^2 * x^3)
         x3 = cute.arch.mul_packed_f32x2(x2, x)
         x2_c6 = cute.arch.mul_packed_f32x2(self.c_taylor_6_mul_c6, x2)
-        part3 = cute.arch.mul_packed_f32x2(x3, x2_c6) # (6*c6 * x^2 * x^3)
-        part2 = cute.arch.fma_packed_f32x2(x3, self.c_taylor_4_mul_c4, part3) # (4*c4 * x^3) + (6*c6 * x^2 * x^3)
-        part1 = cute.arch.fma_packed_f32x2(x, self.c_talyor_2_mul_c2, self.c_half) # 0.5 + (2*c2 * x)
+        part3 = cute.arch.mul_packed_f32x2(x3, x2_c6)  # (6*c6 * x^2 * x^3)
+        part2 = cute.arch.fma_packed_f32x2(
+            x3, self.c_taylor_4_mul_c4, part3
+        )  # (4*c4 * x^3) + (6*c6 * x^2 * x^3)
+        part1 = cute.arch.fma_packed_f32x2(
+            x, self.c_talyor_2_mul_c2, self.c_half
+        )  # 0.5 + (2*c2 * x)
 
         grad = cute.arch.add_packed_f32x2(part1, part2)
         act = cute.arch.fma_packed_f32x2(x2, tmp, x_half)  # 0.5*x + x2*tmp
         return *act, *grad
 
     @cute.jit
-    def grad_gelu_taylor_deg6(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32]:
+    def grad_gelu_taylor_deg6(
+        self, x: Tuple[Float32, Float32]
+    ) -> Tuple[Float32, Float32]:
         # 0.5*x + x2*(c2 + x2*(c4 + x2*c6))
         # grad: 0.5 + 2x * (c2 + x^2 * (c4 + x^2 * c6)) + x^2 * (2x * (c4 + x^2 * c6) + x^2 * (2x*c6))
         #     = 0.5 + 2x * c2 + 2 * x^2 * 2x * (c4 + x^2 * c6) + x^2 * x^2 * 2x * c6
@@ -878,9 +933,13 @@ class Gelu:
         x2 = cute.arch.mul_packed_f32x2(x, x)
         x3 = cute.arch.mul_packed_f32x2(x2, x)
         x2_c6 = cute.arch.mul_packed_f32x2(self.c_taylor_6_mul_c6, x2)
-        part3 = cute.arch.mul_packed_f32x2(x3, x2_c6) # (6*c6 * x^2 * x^3)
-        part2 = cute.arch.fma_packed_f32x2(x3, self.c_taylor_4_mul_c4, part3) # (4*c4 * x^3) + (6*c6 * x^2 * x^3)
-        part1 = cute.arch.fma_packed_f32x2(x, self.c_talyor_2_mul_c2, self.c_half) # 0.5 + (2*c2 * x)
+        part3 = cute.arch.mul_packed_f32x2(x3, x2_c6)  # (6*c6 * x^2 * x^3)
+        part2 = cute.arch.fma_packed_f32x2(
+            x3, self.c_taylor_4_mul_c4, part3
+        )  # (4*c4 * x^3) + (6*c6 * x^2 * x^3)
+        part1 = cute.arch.fma_packed_f32x2(
+            x, self.c_talyor_2_mul_c2, self.c_half
+        )  # 0.5 + (2*c2 * x)
 
         grad = cute.arch.add_packed_f32x2(part1, part2)
 
@@ -891,7 +950,9 @@ class Gelu:
         # 0.5*x + x2*(c2 + x2*(c4 + x2*c6))
         x2 = cute.arch.mul_packed_f32x2(x, x)
         x_half = cute.arch.mul_packed_f32x2(x, self.c_half)
-        tmp = cute.arch.fma_packed_f32x2(x2, self.c_taylor_c6, self.c_taylor_c4)  # c4 + x2*c6
+        tmp = cute.arch.fma_packed_f32x2(
+            x2, self.c_taylor_c6, self.c_taylor_c4
+        )  # c4 + x2*c6
         tmp = cute.arch.fma_packed_f32x2(x2, tmp, self.c_taylor_c2)  # c2 + x2*tmp
         out = cute.arch.fma_packed_f32x2(x2, tmp, x_half)  # 0.5*x + x2*tmp
         return out
@@ -899,13 +960,15 @@ class Gelu:
     @cute.jit
     def gelu_taylor_deg10(self, x: Tuple[Float32, Float32]) -> Tuple[Float32, Float32]:
         # 0.5*x + x^2*(c2 + x^2*(c4 + x^2*(c6 + x^2*(c8 + x^2*c10))))
-        x2     = cute.arch.mul_packed_f32x2(x, x)
+        x2 = cute.arch.mul_packed_f32x2(x, x)
         x_half = cute.arch.mul_packed_f32x2(x, self.c_half)
-        tmp    = cute.arch.fma_packed_f32x2(x2, self.c_taylor_c10, self.c_taylor_c8)  # c8 + x^2*c10
-        tmp    = cute.arch.fma_packed_f32x2(x2, tmp,                self.c_taylor_c6) # c6 + x^2*tmp
-        tmp    = cute.arch.fma_packed_f32x2(x2, tmp,                self.c_taylor_c4) # c4 + x^2*tmp
-        tmp    = cute.arch.fma_packed_f32x2(x2, tmp,                self.c_taylor_c2) # c2 + x^2*tmp
-        out    = cute.arch.fma_packed_f32x2(x2, tmp,                x_half)           # 0.5*x + x^2*tmp
+        tmp = cute.arch.fma_packed_f32x2(
+            x2, self.c_taylor_c10, self.c_taylor_c8
+        )  # c8 + x^2*c10
+        tmp = cute.arch.fma_packed_f32x2(x2, tmp, self.c_taylor_c6)  # c6 + x^2*tmp
+        tmp = cute.arch.fma_packed_f32x2(x2, tmp, self.c_taylor_c4)  # c4 + x^2*tmp
+        tmp = cute.arch.fma_packed_f32x2(x2, tmp, self.c_taylor_c2)  # c2 + x^2*tmp
+        out = cute.arch.fma_packed_f32x2(x2, tmp, x_half)  # 0.5*x + x^2*tmp
         return out
 
     @cute.jit
@@ -917,26 +980,32 @@ class Gelu:
         e2e_res: cutlass.Constexpr[int] = 4,
         e2e_frg_limit: cutlass.Constexpr[int] = 1,
     ):
-            assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
-            frg_tile = 32
-            assert frg_tile % 2 == 0
-            frg_cnt = cute.size(acc_S_row) // frg_tile
-            assert cute.size(acc_S_row) % frg_tile == 0
-            acc_S_row_frg = cute.logical_divide(acc_S_row, cute.make_layout(frg_tile))
-            acc_S_row_converted_frg = cute.logical_divide(
-                acc_S_row_converted, cute.make_layout(frg_tile)
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
+        frg_tile = 32
+        assert frg_tile % 2 == 0
+        frg_cnt = cute.size(acc_S_row) // frg_tile
+        assert cute.size(acc_S_row) % frg_tile == 0
+        acc_S_row_frg = cute.logical_divide(acc_S_row, cute.make_layout(frg_tile))
+        acc_S_row_converted_frg = cute.logical_divide(
+            acc_S_row_converted, cute.make_layout(frg_tile)
+        )
+        for j in cutlass.range_constexpr(frg_cnt):
+            for k in cutlass.range_constexpr(0, cute.size(acc_S_row_frg, mode=[0]), 2):
+                if cutlass.const_expr(
+                    k % e2e_freq < e2e_freq - e2e_res or j >= frg_cnt - e2e_frg_limit
+                ):
+                    s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
+                    acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = self.fast_gelu(s_f2)
+                else:
+                    s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
+                    acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = (
+                        self.gelu_taylor_deg6(s_f2)
+                    )
+            acc_S_row_converted_frg[None, j].store(
+                acc_S_row_frg[None, j].load().to(acc_S_row_converted.element_type)
             )
-            for j in cutlass.range_constexpr(frg_cnt):
-                for k in cutlass.range_constexpr(0, cute.size(acc_S_row_frg, mode=[0]), 2):
-                    if cutlass.const_expr(k % e2e_freq < e2e_freq - e2e_res or j >= frg_cnt - e2e_frg_limit):
-                        s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
-                        acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = self.fast_gelu(s_f2)
-                    else:
-                        s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
-                        acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = self.gelu_taylor_deg6(s_f2)
-                acc_S_row_converted_frg[None, j].store(
-                    acc_S_row_frg[None, j].load().to(acc_S_row_converted.element_type)
-                )
 
     @cute.jit
     def grad_gelu_and_convert(
@@ -949,31 +1018,43 @@ class Gelu:
         e2e_res: cutlass.Constexpr[int] = 4,
         e2e_frg_limit: cutlass.Constexpr[int] = 1,
     ):
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         frg_tile = 32
         assert frg_tile % 2 == 0
         frg_cnt = cute.size(acc_S_row) // frg_tile
         assert cute.size(acc_S_row) % frg_tile == 0
         acc_S_row_frg = cute.logical_divide(acc_S_row, cute.make_layout(frg_tile))
-        acc_P_row_frg = cute.logical_divide(
-            acc_P_row, cute.make_layout(frg_tile)
-        )
-        acc_dS_row_frg = cute.logical_divide(
-            acc_dS_row, cute.make_layout(frg_tile)
-        )
+        acc_P_row_frg = cute.logical_divide(acc_P_row, cute.make_layout(frg_tile))
+        acc_dS_row_frg = cute.logical_divide(acc_dS_row, cute.make_layout(frg_tile))
         acc_P_row_f16_frg = cute.logical_divide(
             acc_P_row_f16, cute.make_layout(frg_tile)
         )
 
         for j in cutlass.range_constexpr(frg_cnt):
             for k in cutlass.range_constexpr(0, cute.size(acc_S_row_frg, mode=[0]), 2):
-                if cutlass.const_expr(k % e2e_freq < e2e_freq - e2e_res or j >= frg_cnt - e2e_frg_limit):
+                if cutlass.const_expr(
+                    k % e2e_freq < e2e_freq - e2e_res or j >= frg_cnt - e2e_frg_limit
+                ):
                     s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
-                    acc_P_row_frg[k, j], acc_P_row_frg[k + 1, j], acc_dS_row_frg[k, j], acc_dS_row_frg[k + 1, j] = self.activation_and_gradient_fast_gelu(s_f2)
+                    (
+                        acc_P_row_frg[k, j],
+                        acc_P_row_frg[k + 1, j],
+                        acc_dS_row_frg[k, j],
+                        acc_dS_row_frg[k + 1, j],
+                    ) = self.activation_and_gradient_fast_gelu(s_f2)
                 else:
                     s_f2 = (acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
-                    acc_P_row_frg[k, j], acc_P_row_frg[k + 1, j], acc_dS_row_frg[k, j], acc_dS_row_frg[k + 1, j] = self.activation_and_gradient_gelu_taylor_deg6(s_f2)
-            acc_P_row_f16_frg[None, j].store(acc_P_row_frg[None, j].load().to(acc_P_row_f16_frg.element_type))
+                    (
+                        acc_P_row_frg[k, j],
+                        acc_P_row_frg[k + 1, j],
+                        acc_dS_row_frg[k, j],
+                        acc_dS_row_frg[k + 1, j],
+                    ) = self.activation_and_gradient_gelu_taylor_deg6(s_f2)
+            acc_P_row_f16_frg[None, j].store(
+                acc_P_row_frg[None, j].load().to(acc_P_row_f16_frg.element_type)
+            )
 
     @cute.jit
     def gelu_and_convert_blockscaled(
@@ -1031,7 +1112,9 @@ class Gelu:
             block_amax_0 = max3_f32(
                 block_amax_0,
                 abs_f32(acc_S_row_frg[k, 0]),
-                max_f32(abs_f32(acc_S_row_frg[k + 1, 0]), abs_f32(acc_S_row_frg[k + 2, 0])),
+                max_f32(
+                    abs_f32(acc_S_row_frg[k + 1, 0]), abs_f32(acc_S_row_frg[k + 2, 0])
+                ),
             )
         # Remainder (2 elements)
         block_amax_0 = max_f32(block_amax_0, abs_f32(acc_S_row_frg[30, 0]))
@@ -1077,7 +1160,9 @@ class Gelu:
             block_amax_1 = max3_f32(
                 block_amax_1,
                 abs_f32(acc_S_row_frg[k, 1]),
-                max_f32(abs_f32(acc_S_row_frg[k + 1, 1]), abs_f32(acc_S_row_frg[k + 2, 1])),
+                max_f32(
+                    abs_f32(acc_S_row_frg[k + 1, 1]), abs_f32(acc_S_row_frg[k + 2, 1])
+                ),
             )
         block_amax_1 = max_f32(block_amax_1, abs_f32(acc_S_row_frg[30, 1]))
         block_amax_1 = max_f32(block_amax_1, abs_f32(acc_S_row_frg[31, 1]))
@@ -1116,7 +1201,9 @@ class Gelu:
             block_amax_2 = max3_f32(
                 block_amax_2,
                 abs_f32(acc_S_row_frg[k, 2]),
-                max_f32(abs_f32(acc_S_row_frg[k + 1, 2]), abs_f32(acc_S_row_frg[k + 2, 2])),
+                max_f32(
+                    abs_f32(acc_S_row_frg[k + 1, 2]), abs_f32(acc_S_row_frg[k + 2, 2])
+                ),
             )
         block_amax_2 = max_f32(block_amax_2, abs_f32(acc_S_row_frg[30, 2]))
         block_amax_2 = max_f32(block_amax_2, abs_f32(acc_S_row_frg[31, 2]))
@@ -1155,7 +1242,9 @@ class Gelu:
             block_amax_3 = max3_f32(
                 block_amax_3,
                 abs_f32(acc_S_row_frg[k, 3]),
-                max_f32(abs_f32(acc_S_row_frg[k + 1, 3]), abs_f32(acc_S_row_frg[k + 2, 3])),
+                max_f32(
+                    abs_f32(acc_S_row_frg[k + 1, 3]), abs_f32(acc_S_row_frg[k + 2, 3])
+                ),
             )
         block_amax_3 = max_f32(block_amax_3, abs_f32(acc_S_row_frg[30, 3]))
         block_amax_3 = max_f32(block_amax_3, abs_f32(acc_S_row_frg[31, 3]))

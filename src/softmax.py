@@ -1,43 +1,71 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Tri Dao.
+
 # pyre-ignore-all-errors
 import math
 import operator
 from typing import Tuple
 
+import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
 import cutlass
 import cutlass.cute as cute
 from cutlass import Float32
 
-import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
-
 
 class Softmax:
+    """Online softmax computation for flash attention (SM80/SM90).
+
+    Maintains running row-wise max and sum statistics across KV blocks to compute
+    numerically stable softmax without materializing the full attention matrix.
+    """
+
     def __init__(
         self,
         scale_log2: Float32,
         num_rows: cutlass.Constexpr[int],
         arch: cutlass.Constexpr[int] = 80,
     ):
+        """Initialize online softmax state.
+
+        Args:
+            scale_log2: log2(softmax_scale) for base-2 exponentiation.
+            num_rows: number of rows in the accumulator per thread.
+            arch: GPU architecture (80=Ampere, 90=Hopper, 100=Blackwell).
+        """
         self.scale_log2 = scale_log2
         self.row_max = cute.make_fragment(num_rows, Float32)
         self.row_sum = cute.make_fragment_like(self.row_max)
         self.arch = arch
 
     def reset(self) -> None:
+        """Reset running statistics to initial values (-inf for max, 0 for sum)."""
         self.row_max.fill(-Float32.inf)
         self.row_sum.fill(0.0)
 
     def _compute_row_max(
         self, acc_S_row: cute.TensorSSA, init_val: float | Float32 | None = None
     ) -> Float32:
+        """Compute the maximum value across a row of the attention score accumulator."""
         return utils.fmax_reduce(acc_S_row, init_val, arch=self.arch)
 
     def _compute_row_sum(
         self, acc_S_row_exp: cute.TensorSSA, init_val: float | Float32 | None = None
     ) -> Float32:
+        """Compute the sum of a row of exponentiated attention scores."""
         return utils.fadd_reduce(acc_S_row_exp, init_val, arch=self.arch)
 
     @cute.jit
@@ -69,17 +97,23 @@ class Softmax:
                 row_max_cur = 0.0 if row_max_cur == -Float32.inf else row_max_cur
             if cutlass.const_expr(is_first):
                 row_max_cur_scaled = row_max_cur * self.scale_log2
-                acc_S_row_exp = utils.exp2f(acc_S_row * self.scale_log2 - row_max_cur_scaled)
+                acc_S_row_exp = utils.exp2f(
+                    acc_S_row * self.scale_log2 - row_max_cur_scaled
+                )
                 acc_S_row_sum = self._compute_row_sum(acc_S_row_exp)
                 row_scale[r] = 1.0
             else:
                 row_max_prev = self.row_max[r]
                 row_max_cur_scaled = row_max_cur * self.scale_log2
-                acc_S_row_exp = utils.exp2f(acc_S_row * self.scale_log2 - row_max_cur_scaled)
+                acc_S_row_exp = utils.exp2f(
+                    acc_S_row * self.scale_log2 - row_max_cur_scaled
+                )
                 # row_scale[r] = utils.exp2f(row_max_prev * self.scale_log2 - row_max_cur_scaled)
-                row_scale[r] = utils.exp2f((row_max_prev - row_max_cur) * self.scale_log2)
-                acc_S_row_sum = (
-                    self._compute_row_sum(acc_S_row_exp, init_val=self.row_sum[r] * row_scale[r])
+                row_scale[r] = utils.exp2f(
+                    (row_max_prev - row_max_cur) * self.scale_log2
+                )
+                acc_S_row_sum = self._compute_row_sum(
+                    acc_S_row_exp, init_val=self.row_sum[r] * row_scale[r]
                 )
             self.row_max[r] = row_max_cur
             self.row_sum[r] = acc_S_row_sum
@@ -87,24 +121,36 @@ class Softmax:
         return row_scale
 
     @cute.jit
-    def finalize(self, final_scale: Float32 = 1.0, sink_val: Float32 | cute.Tensor | None = None) -> cute.Tensor:
+    def finalize(
+        self, final_scale: Float32 = 1.0, sink_val: Float32 | cute.Tensor | None = None
+    ) -> cute.Tensor:
         """Finalize the online softmax by computing the scale and logsumexp."""
-        if cutlass.const_expr(sink_val is not None and isinstance(sink_val, cute.Tensor)):
+        if cutlass.const_expr(
+            sink_val is not None and isinstance(sink_val, cute.Tensor)
+        ):
             assert cute.size(sink_val) == cute.size(self.row_sum)
         # quad reduction for row_sum as we didn't do it during each iteration of online softmax
-        self.row_sum.store(utils.warp_reduce(self.row_sum.load(), operator.add, width=4))
+        self.row_sum.store(
+            utils.warp_reduce(self.row_sum.load(), operator.add, width=4)
+        )
         row_scale = cute.make_fragment_like(self.row_max, Float32)
         for r in cutlass.range(cute.size(self.row_sum), unroll_full=True):
             if cutlass.const_expr(sink_val is not None):
-                sink_val_cur = sink_val if not isinstance(sink_val, cute.Tensor) else sink_val[r]
+                sink_val_cur = (
+                    sink_val if not isinstance(sink_val, cute.Tensor) else sink_val[r]
+                )
                 LOG2_E = math.log2(math.e)
-                self.row_sum[r] += utils.exp2f(sink_val_cur * LOG2_E - self.row_max[r] * self.scale_log2)
+                self.row_sum[r] += utils.exp2f(
+                    sink_val_cur * LOG2_E - self.row_max[r] * self.scale_log2
+                )
             # if row_sum is zero or nan, set acc_O_mn_row to 1.0
             acc_O_mn_row_is_zero_or_nan = (
                 self.row_sum[r] == 0.0 or self.row_sum[r] != self.row_sum[r]
             )
             row_scale[r] = (
-                cute.arch.rcp_approx(self.row_sum[r] if not acc_O_mn_row_is_zero_or_nan else 1.0)
+                cute.arch.rcp_approx(
+                    self.row_sum[r] if not acc_O_mn_row_is_zero_or_nan else 1.0
+                )
             ) * final_scale
             row_sum_cur = self.row_sum[r]
             LN2 = math.log(2.0)
@@ -130,12 +176,27 @@ class Softmax:
 
 
 class SoftmaxSm100(Softmax):
-    def __init__(self, scale_log2: Float32, rescale_threshold: cutlass.Constexpr[float] = 0.0):
+    """Online softmax computation optimized for Blackwell (SM100) architecture.
+
+    Processes one row at a time using packed F32x2 operations and hardware
+    exp2 instructions.
+    """
+
+    def __init__(
+        self, scale_log2: Float32, rescale_threshold: cutlass.Constexpr[float] = 0.0
+    ):
         super().__init__(scale_log2, num_rows=1, arch=100)
         self.rescale_threshold = rescale_threshold
 
     @cute.jit
-    def update_row_max(self, acc_S_row: cute.TensorSSA, is_first: int) -> Tuple[Float32, Float32]:
+    def update_row_max(
+        self, acc_S_row: cute.TensorSSA, is_first: int
+    ) -> Tuple[Float32, Float32]:
+        """Update the running row maximum.
+
+        Returns (row_max_safe, acc_scale) where acc_scale is the rescaling
+        factor for the accumulator from the previous max.
+        """
         if cutlass.const_expr(is_first):
             row_max_new = self._compute_row_max(acc_S_row)
             row_max_safe = row_max_new if row_max_new != -cutlass.Float32.inf else 0.0
@@ -157,7 +218,10 @@ class SoftmaxSm100(Softmax):
     def update_row_sum(
         self, acc_S_row_exp: cute.TensorSSA, row_scale: Float32, is_first: int = False
     ) -> None:
-        init_val = self.row_sum[0] * row_scale if cutlass.const_expr(not is_first) else None
+        """Update the running row sum with new exponentiated scores, rescaling the previous sum by row_scale."""
+        init_val = (
+            self.row_sum[0] * row_scale if cutlass.const_expr(not is_first) else None
+        )
         # self.row_sum[0] = self._compute_row_sum(acc_S_row_exp, init_val=self.row_sum[0] * row_scale)
         self.row_sum[0] = self._compute_row_sum(acc_S_row_exp, init_val=init_val)
         # tmp = self._compute_row_sum(acc_S_row_exp)
@@ -169,7 +233,13 @@ class SoftmaxSm100(Softmax):
         acc_S_row: cute.Tensor,
         row_max: Float32,
     ):
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        """Scale attention scores by log2(softmax_scale) and subtract the row maximum, preparing for exp2.
+
+        Uses packed F32x2 FMA for efficiency.
+        """
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         row_max_scaled = row_max * self.scale_log2
         for i in cutlass.range(0, cute.size(acc_S_row.shape), 2, unroll_full=True):
             acc_S_row[i], acc_S_row[i + 1] = cute.arch.fma_packed_f32x2(
@@ -188,7 +258,13 @@ class SoftmaxSm100(Softmax):
         e2e_res: cutlass.Constexpr[int] = 4,
         e2e_frg_limit: cutlass.Constexpr[int] = 1,
     ):
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        """Apply exp2 to scaled attention scores and convert to target dtype (e.g., BF16/FP8).
+
+        Supports end-to-end fused exp2 (e2e) for reduced instruction count.
+        """
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         frg_tile = 32
         assert frg_tile % 2 == 0
         frg_cnt = cute.size(acc_S_row) // frg_tile
@@ -205,11 +281,18 @@ class SoftmaxSm100(Softmax):
                     acc_S_row_frg[k, j] = cute.arch.exp2(acc_S_row_frg[k, j])
                     acc_S_row_frg[k + 1, j] = cute.arch.exp2(acc_S_row_frg[k + 1, j])
                 else:
-                    if cutlass.const_expr(k % e2e_freq < e2e_freq - e2e_res or j >= frg_cnt - e2e_frg_limit):
+                    if cutlass.const_expr(
+                        k % e2e_freq < e2e_freq - e2e_res
+                        or j >= frg_cnt - e2e_frg_limit
+                    ):
                         acc_S_row_frg[k, j] = cute.arch.exp2(acc_S_row_frg[k, j])
-                        acc_S_row_frg[k + 1, j] = cute.arch.exp2(acc_S_row_frg[k + 1, j])
+                        acc_S_row_frg[k + 1, j] = cute.arch.exp2(
+                            acc_S_row_frg[k + 1, j]
+                        )
                     else:
-                        acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = utils.e2e_asm2(acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j])
+                        acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j] = utils.e2e_asm2(
+                            acc_S_row_frg[k, j], acc_S_row_frg[k + 1, j]
+                        )
             acc_S_row_converted_frg[None, j].store(
                 acc_S_row_frg[None, j].load().to(acc_S_row_converted.element_type)
             )
@@ -221,7 +304,14 @@ class SoftmaxSm100(Softmax):
         row_max: Float32,
         acc_S_row_converted: cute.Tensor,
     ):
-        assert cute.size(acc_S_row.shape) % 2 == 0, "acc_S_row must have an even number of elements"
+        """Combined scale-subtract-exp2-convert operation.
+
+        First applies FMA to scale and subtract row max, then applies exp2
+        and converts to target dtype.
+        """
+        assert cute.size(acc_S_row.shape) % 2 == 0, (
+            "acc_S_row must have an even number of elements"
+        )
         minus_row_max_scaled = -row_max * self.scale_log2
         for i in cutlass.range_constexpr(0, cute.size(acc_S_row.shape), 2):
             acc_S_row[i], acc_S_row[i + 1] = cute.arch.fma_packed_f32x2(

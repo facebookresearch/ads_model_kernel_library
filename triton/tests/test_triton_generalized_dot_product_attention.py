@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-
-# pyre-unsafe
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Unit tests for triton_generalized_dot_product_attention module.
@@ -14,7 +25,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import torch
-from ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention import (
+
+from ..triton_generalized_dot_product_attention import (
     cpu_generalized_dot_product_attention,
     create_dummy_tensor,
     expect_contiguous,
@@ -404,7 +416,7 @@ class GeneralizedDotProductAttentionTestCase(unittest.TestCase):
         self.assertIsNotNone(result)
 
     @patch(
-        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.ops.ads_mkl.generalized_dot_product_attention"
+        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.ops.gdpa.generalized_dot_product_attention"
     )
     @patch(
         "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.jit.is_scripting"
@@ -442,7 +454,7 @@ class GeneralizedDotProductAttentionTestCase(unittest.TestCase):
         self.assertIsNotNone(result)
 
     @patch(
-        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.ops.ads_mkl.generalized_dot_product_attention"
+        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.ops.gdpa.generalized_dot_product_attention"
     )
     @patch(
         "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.torch.jit.is_scripting"

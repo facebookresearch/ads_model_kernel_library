@@ -1,8 +1,28 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Copyright (c) 2025, Tri Dao.
-# pyre-ignore-all-errors
 
+"""Low-level CUDA utilities for flash attention kernels.
+
+Provides math operations (exp2, log2, fmax, fadd), warp-level primitives
+(reduce, shuffle, prefix sum), tensor layout conversions, and data type
+conversion routines.
+"""
+
+# pyre-ignore-all-errors
 import hashlib
 import inspect
 import math
@@ -56,6 +76,11 @@ def hash_callable(func: Callable) -> str:
 
 
 def create_softcap_scoremod(softcap_val):
+    """Create a score modification function for attention logit soft-capping.
+
+    Returns a JIT-compiled function that applies x * tanh(x / softcap) to
+    attention scores.
+    """
     inv_softcap = 1.0 / softcap_val
 
     @cute.jit
@@ -67,6 +92,7 @@ def create_softcap_scoremod(softcap_val):
 
 
 def convert_from_dlpack(x, leading_dim, alignment=16, divisibility=1) -> cute.Tensor:
+    """Convert a PyTorch tensor to a CUTE tensor via DLPack with dynamic layout marking."""
     return (
         from_dlpack(x, assumed_align=alignment)
         .mark_layout_dynamic(leading_dim=leading_dim)
@@ -81,6 +107,7 @@ def make_tiled_copy_A(
     tiled_mma: cute.TiledMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.TiledCopy:
+    """Create a tiled copy for the A operand of an MMA, respecting swapAB for transposed attention."""
     if const_expr(swapAB):
         return cute.make_tiled_copy_B(copy_atom, tiled_mma)
     else:
@@ -92,6 +119,7 @@ def make_tiled_copy_B(
     tiled_mma: cute.TiledMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.TiledCopy:
+    """Create a tiled copy for the B operand of an MMA, respecting swapAB for transposed attention."""
     if const_expr(swapAB):
         return cute.make_tiled_copy_A(copy_atom, tiled_mma)
     else:
@@ -103,6 +131,7 @@ def mma_make_fragment_A(
     thr_mma: cute.core.ThrMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
+    """Create an MMA fragment for the A operand, respecting swapAB for transposed attention."""
     if const_expr(swapAB):
         return mma_make_fragment_B(smem, thr_mma)
     else:
@@ -114,6 +143,7 @@ def mma_make_fragment_B(
     thr_mma: cute.core.ThrMma,
     swapAB: cutlass.Constexpr[bool] = False,
 ) -> cute.Tensor:
+    """Create an MMA fragment for the B operand, respecting swapAB for transposed attention."""
     if const_expr(swapAB):
         return mma_make_fragment_A(smem, thr_mma)
     else:
@@ -125,6 +155,10 @@ def get_smem_store_atom(
     element_type: Type[cute.Numeric],
     transpose: bool = False,
 ) -> cute.CopyAtom:
+    """Get the appropriate shared memory store copy atom for the given architecture and element type.
+
+    Uses StMatrix for SM90+ with 16-bit types.
+    """
     if const_expr(arch < 90 or element_type.width != 16):
         return cute.make_copy_atom(
             cute.nvgpu.CopyUniversalOp(),
@@ -144,6 +178,10 @@ def warp_reduce(
     op: Callable,
     width: cutlass.Constexpr[int] = cute.arch.WARP_SIZE,
 ) -> cute.TensorSSA | cute.Numeric:
+    """Warp-level reduction using butterfly shuffle.
+
+    Reduces val across width lanes using the given binary operator (e.g., fmax, add).
+    """
     if const_expr(isinstance(val, cute.TensorSSA)):
         res = cute.make_fragment(val.shape, val.dtype)
         res.store(val)
@@ -190,6 +228,7 @@ def convert_layout_acc_mn(
 
 
 def make_acc_tensor_mn_view(acc: cute.Tensor, transpose: bool = False) -> cute.Tensor:
+    """Create an (M, N) view of an MMA accumulator tensor, optionally transposed."""
     return cute.make_tensor(
         acc.iterator, convert_layout_acc_mn(acc.layout, transpose=transpose)
     )
@@ -236,10 +275,12 @@ def convert_layout_acc_frgA(acc_layout: cute.Layout) -> cute.Layout:
 
 
 def make_acc_tensor_frgA_view(acc: cute.Tensor) -> cute.Tensor:
+    """Create a fragment-A view of an MMA accumulator for back-to-back GEMM."""
     return cute.make_tensor(acc.iterator, convert_layout_acc_frgA(acc.layout))
 
 
 def select(a: cute.Tensor, mode: list[int]) -> cute.Tensor:
+    """Select specific modes from a tensor, returning a view with reduced rank."""
     return cute.make_tensor(a.iterator, cute.select(a.layout, mode))
 
 
@@ -296,6 +337,7 @@ def exp2f(x: cute.TensorSSA | Float32) -> cute.TensorSSA | Float32:
 
 @dsl_user_op
 def log2f(a: float | Float32, *, loc=None, ip=None) -> Float32:
+    """Approximate log base 2 using PTX lg2.approx.ftz.f32 instruction."""
     return Float32(
         llvm.inline_asm(
             T.f32(),
@@ -311,6 +353,7 @@ def log2f(a: float | Float32, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def logf(a: float | Float32, *, loc=None, ip=None) -> Float32:
+    """Approximate natural log: log(x) = log2(x) * ln(2)."""
     return log2f(a, loc=loc, ip=ip) * math.log(2.0)
 
 
@@ -323,6 +366,10 @@ def fmax(
     loc=None,
     ip=None,
 ) -> Float32:
+    """Floating-point maximum supporting 2 or 3 inputs.
+
+    Uses NVVM fmax with optional 3-input variant on SM100.
+    """
     return Float32(
         nvvm.fmax(
             T.f32(),
@@ -341,6 +388,10 @@ def fmax_reduce(
     init_val: float | Float32 | None = None,
     arch: cutlass.Constexpr[int] = 80,
 ) -> Float32:
+    """Reduce a tensor to its maximum value.
+
+    Uses 3-input fmax on SM100 for better instruction throughput.
+    """
     if const_expr(arch < 100 or cute.size(x.shape) % 8 != 0):
         # if const_expr(init_val is None):
         #     init_val = -cutlass.Float32.if
@@ -398,6 +449,10 @@ def fadd_reduce(
     init_val: float | Float32 | None = None,
     arch: cutlass.Constexpr[int] = 80,
 ) -> Float32:
+    """Reduce a tensor to its sum.
+
+    Uses packed F32x2 add on SM100 for better instruction throughput.
+    """
     if const_expr(arch < 100 or cute.size(x.shape) % 8 != 0):
         if const_expr(init_val is None):
             init_val = Float32.zero
@@ -439,6 +494,7 @@ def fadd_reduce(
 def atomic_add_fp32(
     a: float | Float32, gmem_ptr: cute.Pointer, *, loc=None, ip=None
 ) -> None:
+    """Atomic floating-point add to global memory using NVVM atomicrmw."""
     # gmem_ptr_i64 = gmem_ptr.toint(loc=loc, ip=ip).ir_value()
     # # cache_hint = cutlass.Int64(0x12F0000000000000)
     # llvm.inline_asm(
@@ -466,6 +522,7 @@ def atomic_add_fp32(
 def elem_pointer(
     x: cute.Tensor, coord: cute.Coord, *, loc=None, ip=None
 ) -> cute.Pointer:
+    """Compute a pointer to a specific element of a CUTE tensor, with Int32 coordinate arithmetic."""
     return x.iterator + cute.crd2idx(coord, x.layout, loc=loc, ip=ip)
 
 
@@ -473,6 +530,7 @@ def elem_pointer(
 def elem_pointer_i64(
     x: cute.Tensor, coord: cute.Coord, *, loc=None, ip=None
 ) -> cute.Pointer:
+    """Compute a pointer to a specific element of a CUTE tensor, with Int64 coordinate arithmetic."""
     flat_coord_i64 = tuple(cutlass.Int64(c) for c in cute.flatten(coord))
     flat_stride = cute.flatten_to_tuple(x.stride)
     assert len(flat_coord_i64) == len(flat_stride), (
@@ -491,6 +549,10 @@ def elem_pointer_i64(
 
 @cute.jit
 def predicate_k(tAcA: cute.Tensor, limit: cutlass.Int32) -> cute.Tensor:
+    """Compute out-of-bounds predicates for the head dimension (K mode).
+
+    Used to mask loads/stores when head_dim is not a multiple of the tile size.
+    """
     # Only compute predicates for the "k" dimension. For the mn dimension, we will use "if"
     tApA = cute.make_fragment(
         cute.make_layout(
@@ -512,6 +574,7 @@ def predicate_k(tAcA: cute.Tensor, limit: cutlass.Int32) -> cute.Tensor:
 
 
 def canonical_warp_group_idx(sync: bool = True) -> cutlass.Int32:
+    """Get the warp group index (threadIdx.x // 128), optionally made uniform across the warp group."""
     warp_group_idx = cute.arch.thread_idx()[0] // 128
     if const_expr(sync):
         warp_group_idx = cute.arch.make_warp_uniform(warp_group_idx)
@@ -544,6 +607,10 @@ def shuffle_sync(
     offset: cute.typing.Int,
     width: cutlass.Constexpr[int] = cute.arch.WARP_SIZE,
 ) -> cute.Numeric:
+    """Warp-level indexed shuffle supporting types wider than 32 bits.
+
+    Reinterprets the value as Int32 chunks and shuffles each independently.
+    """
     assert value.width % 32 == 0, "value type must be a multiple of 32 bits"
     # 1 -> 0b11111, 2 -> 0b11110, 4 -> 0b11100, 8 -> 0b11000, 16 -> 0b10000, 32 -> 0b00000
     mask = cute.arch.WARP_SIZE - width
@@ -583,6 +650,10 @@ def shr_u32(
 def warp_prefix_sum(
     val: cutlass.Int32, lane: Optional[cutlass.Int32] = None
 ) -> cutlass.Int32:
+    """Inclusive prefix sum within a warp using shuffle-up.
+
+    Returns the running sum for each lane.
+    """
     if const_expr(lane is None):
         lane = cute.arch.lane_idx()
     # if cute.arch.thread_idx()[0] >= 128 and cute.arch.thread_idx()[0] < 128 + 32 and cute.arch.block_idx()[0] == 0: cute.printf("tidx = %d, val = %d", cute.arch.thread_idx()[0] % 32, val)
@@ -646,6 +717,7 @@ def cvt_fp8x4_f32(
 def cvt_f16x2_f32(
     a: float | Float32, b: float | Float32, to_dtype: Type, *, loc=None, ip=None
 ) -> cutlass.Int32:
+    """Convert 2 F32 values to 2 FP16/BF16 values packed in an Int32 using PTX cvt instruction."""
     assert to_dtype in [
         cutlass.BFloat16,
         cutlass.Float16,
@@ -729,6 +801,7 @@ def cvt_f16(src: cute.Tensor, dst_or_dtype):
 def evaluate_polynomial(
     x: Float32, poly: Tuple[Float32, ...], *, loc=None, ip=None
 ) -> Float32:
+    """Evaluate a polynomial using Horner's method."""
     deg = len(poly) - 1
     out = poly[deg]
     for i in cutlass.range_constexpr(deg - 1, -1, -1):
@@ -741,6 +814,7 @@ def evaluate_polynomial(
 def evaluate_polynomial_2(
     x: Float32, y: Float32, poly: Tuple[Float32, ...], *, loc=None, ip=None
 ) -> Tuple[Float32, Float32]:
+    """Evaluate a polynomial for two inputs simultaneously using packed F32x2 FMA via Horner's method."""
     deg = len(poly) - 1
     out = (poly[deg], poly[deg])
     for i in cutlass.range_constexpr(deg - 1, -1, -1):
@@ -752,6 +826,7 @@ def evaluate_polynomial_2(
 def add_round_down(
     x: float | Float32, y: float | Float32, *, loc=None, ip=None
 ) -> Float32:
+    """Add two floats with round-down (toward -inf) rounding mode using PTX add.rm instruction."""
     # There's probably a way to call llvm or nvvm to do this instead of ptx
     return cutlass.Float32(
         llvm.inline_asm(
@@ -797,6 +872,11 @@ def combine_int_frac_ex2(
 
 @dsl_user_op
 def ex2_emulation(x: Float32, *, loc=None, ip=None) -> Float32:
+    """Software emulation of exp2 using degree-3 polynomial.
+
+    Splits x into integer and fractional parts, evaluates exp2(frac) via
+    polynomial, then combines via integer exponent manipulation.
+    """
     # We assume x <= 127.0
     poly_ex2_deg3 = (
         1.0,
@@ -821,6 +901,7 @@ def ex2_emulation(x: Float32, *, loc=None, ip=None) -> Float32:
 def ex2_emulation_2(
     x: Float32, y: Float32, *, loc=None, ip=None
 ) -> Tuple[Float32, Float32]:
+    """Paired exp2 emulation for two values using packed F32x2 operations for better throughput."""
     # We assume x <= 127.0 and y <= 127.0
     poly_ex2_deg3 = (
         1.0,
@@ -846,6 +927,10 @@ def ex2_emulation_2(
 
 @dsl_user_op
 def e2e_asm2(x: Float32, y: Float32, *, loc=None, ip=None) -> Tuple[Float32, Float32]:
+    """End-to-end inline PTX assembly for paired exp2 computation.
+
+    Fuses the entire exp2 pipeline into a single asm block to minimize register pressure.
+    """
     out_f32x2 = llvm.inline_asm(
         llvm.StructType.get_literal([T.f32(), T.f32()]),
         [Float32(x).ir_value(loc=loc, ip=ip), Float32(y, loc=loc, ip=ip).ir_value()],
@@ -895,6 +980,7 @@ def e2e_asm2(x: Float32, y: Float32, *, loc=None, ip=None) -> Tuple[Float32, Flo
 def domain_offset_aligned(
     coord: cute.Coord, tensor: cute.Tensor, *, loc=None, ip=None
 ) -> cute.Tensor:
+    """Offset a tensor's base pointer by a coordinate, preserving alignment assumptions."""
     assert isinstance(tensor.iterator, cute.Pointer)
     # We assume that applying the offset does not change the pointer alignment
     new_ptr = cute.make_ptr(
@@ -910,6 +996,7 @@ def domain_offset_aligned(
 def domain_offset_i64(
     coord: cute.Coord, tensor: cute.Tensor, *, loc=None, ip=None
 ) -> cute.Tensor:
+    """Offset a tensor's base pointer by a coordinate using 64-bit arithmetic to avoid overflow for large tensors."""
     flat_coord_i64 = tuple(cutlass.Int64(c) for c in cute.flatten(coord))
     flat_stride = cute.flatten_to_tuple(tensor.stride)
     assert len(flat_coord_i64) == len(flat_stride), (
@@ -931,6 +1018,7 @@ def domain_offset_i64(
 def coord_offset_i64(
     tensor: cute.Tensor, idx: cute.typing.Int, dim: int, *, loc=None, ip=None
 ) -> cute.Tensor:
+    """Offset a tensor along a single dimension using 64-bit arithmetic, slicing out that dimension."""
     offset = cutlass.Int64(idx) * cute.size(tensor.stride[dim])
     assert isinstance(tensor.iterator, cute.Pointer)
     # HACK: we assume that applying the offset does not change the pointer alignment

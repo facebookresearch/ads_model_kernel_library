@@ -1,6 +1,18 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# @nolint
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # [2025-07-04] Version in Cute-DSL, for Hopper and Blackwell. You'd need to install nvidia-cutlass-dsl==4.1.0.
 
@@ -22,6 +34,7 @@
 # - append KV to existing KV cache
 # - bwd pass optimized for Hopper/Blackwell
 # - FP8 bwd pass
+
 # pyre-ignore-all-errors
 import math
 from typing import Generator, List, Optional, Tuple
@@ -30,16 +43,6 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import torch
-from ads_mkl.ops.cute_dsl.gdpa.src import utils
-from ads_mkl.ops.cute_dsl.gdpa.src.flash_bwd_postprocess import (
-    FlashAttentionBackwardPostprocess,
-)
-from ads_mkl.ops.cute_dsl.gdpa.src.flash_bwd_preprocess import (
-    FlashAttentionBackwardPreprocess,
-)
-from ads_mkl.ops.cute_dsl.gdpa.src.flash_bwd_sm100 import FlashAttentionBackwardSm100
-from ads_mkl.ops.cute_dsl.gdpa.src.flash_fwd_combine import FlashAttentionForwardCombine
-from ads_mkl.ops.cute_dsl.gdpa.src.flash_fwd_sm100 import FlashAttentionForwardSm100
 from cutlass.cute.runtime import from_dlpack
 from torch.utils.flop_counter import (
     _unpack_flash_attention_nested_shapes,
@@ -48,8 +51,28 @@ from torch.utils.flop_counter import (
     sdpa_flop_count,
 )
 
+from . import utils
+from .flash_bwd_postprocess import FlashAttentionBackwardPostprocess
+from .flash_bwd_preprocess import FlashAttentionBackwardPreprocess
+from .flash_bwd_sm100 import FlashAttentionBackwardSm100
+from .flash_fwd_combine import FlashAttentionForwardCombine
+from .flash_fwd_sm100 import FlashAttentionForwardSm100
+
 
 def maybe_contiguous(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Ensures a tensor is contiguous in the last dimension if needed.
+
+    If the tensor exists and its last dimension stride is not 1 (i.e., not
+    contiguous in memory along the innermost dimension), returns a contiguous
+    copy. Otherwise, returns the tensor unchanged.
+
+    Args:
+        x: Input tensor, or None.
+
+    Returns:
+        The input tensor made contiguous in the last dimension, or None if
+        input is None.
+    """
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
@@ -74,6 +97,27 @@ def _unpack_nested_shapes_meta(
     None,
     None,
 ]:
+    """Approximates per-sequence shapes for variable-length attention FLOP counting.
+
+    This is used when tensors are on the meta device (i.e., during tracing or
+    abstract interpretation) where actual sequence lengths from cu_seqlens
+    are not available. It uses average sequence lengths (total tokens / batch size)
+    as an approximation for each sequence in the batch.
+
+    Args:
+        query: Query tensor of shape (total_q, num_heads_q, head_dim_q).
+        key: Key tensor of shape (total_k, num_heads_k, head_dim_k).
+        value: Value tensor of shape (total_k, num_heads_v, head_dim_v).
+        grad_out: Optional gradient output tensor for backward FLOP counting.
+        cum_seq_q: Cumulative sequence lengths for queries, shape (batch_size + 1,).
+        cum_seq_k: Cumulative sequence lengths for keys, shape (batch_size + 1,).
+        max_q: Maximum query sequence length (unused, kept for API compatibility).
+        max_k: Maximum key sequence length (unused, kept for API compatibility).
+
+    Yields:
+        Tuples of (query_shape, key_shape, value_shape, grad_out_shape) where each
+        shape is (1, num_heads, avg_seqlen, head_dim) for FLOP counting.
+    """
     _, h_q, d_q = query.shape
     _, h_k, d_k = key.shape
     _, h_v, d_v = value.shape
@@ -93,6 +137,7 @@ def _unpack_nested_shapes_meta(
     return
 
 
+# Maps PyTorch dtypes to CUTLASS numeric types for use in CUTE-DSL kernels.
 torch2cute_dtype_map = {
     torch.float16: cutlass.Float16,
     torch.bfloat16: cutlass.BFloat16,
@@ -116,6 +161,31 @@ def get_fp8_dtype(tensor: torch.Tensor, fp8_format: str = "e4m3"):
 
 # pyre-ingore
 def precompute_for_varline(jagged_tensor, cu_seqlens, m_block_size=128, is_bwd=False):
+    """Precomputes tile-to-batch mappings for variable-length attention.
+
+    Creates two tensors needed by the variable-length attention kernel:
+    - cu_block_q: Cumulative tile (block) counts per batch element, used to
+      determine which tiles belong to which batch element.
+    - tile_to_batch: Maps each tile index to its corresponding batch index.
+
+    This function avoids the CUDA stream synchronization that would be caused
+    by a naive use of repeat_interleave by constructing the mapping via
+    cumulative sums and arange.
+
+    Args:
+        jagged_tensor: The jagged (variable-length) tensor, used to extract
+            num_head and total_len from its shape.
+        cu_seqlens: Cumulative sequence lengths tensor of shape (batch_size + 1,).
+        m_block_size: Tile size along the M (sequence) dimension. Default: 128.
+        is_bwd: Whether this is for the backward pass. Affects the q_stage
+            multiplier used to compute tile sizes.
+
+    Returns:
+        Tuple of (cu_block_q, tile_to_batch):
+            cu_block_q: Cumulative block counts per batch, shape (batch_size,).
+            tile_to_batch: Mapping from tile index to batch index,
+                shape (total_tiles,).
+    """
     num_head = jagged_tensor.shape[-2]
     batch_size = cu_seqlens.shape[0] - 1
     total_len = jagged_tensor.shape[0]
@@ -153,6 +223,30 @@ def precompute_for_varline_load_balancing(
     is_bwd=False,
     sm_count=144,
 ):
+    """Precomputes load-balanced tile-to-batch/head/block mappings for variable-length attention.
+
+    Uses zigzag scheduling to distribute workloads evenly across SMs. Tiles are
+    sorted by their workload (number of K/V tiles to process) in descending order,
+    then assigned to SMs in a zigzag pattern (forward on even cycles, reverse on
+    odd cycles) to balance the total work per SM.
+
+    Args:
+        q_tensor: Query tensor, used to extract num_head from its shape.
+        q_cu_seqlens: Cumulative sequence lengths for queries, shape (batch_size + 1,).
+        k_cu_seqlens: Cumulative sequence lengths for keys, shape (batch_size + 1,).
+        m_block_size: Tile size along the M (query sequence) dimension. Default: 128.
+        n_block_size: Tile size along the N (key sequence) dimension. Default: 128.
+        is_bwd: Whether this is for the backward pass. When True, the roles of
+            Q and K dimensions are swapped for scheduling.
+        sm_count: Number of streaming multiprocessors on the GPU. Default: 144.
+
+    Returns:
+        Tuple of (tile_to_batch, tile_to_head, tile_to_block):
+            tile_to_batch: Batch index for each tile, shape (total_tiles,).
+            tile_to_head: Head index for each tile, shape (total_tiles,).
+            tile_to_block: Block (tile) index within the sequence for each tile,
+                shape (total_tiles,).
+    """
     num_head = q_tensor.shape[-2]
     batch_size = q_cu_seqlens.shape[0] - 1
     q_tile_size = m_block_size * FlashAttentionForwardSm100.q_stage * 1
@@ -236,6 +330,32 @@ def _extract_sequence_dimensions(
     cu_seqlens_k: Optional[torch.Tensor],
     page_table: Optional[torch.Tensor],
 ):
+    """Extracts batch size and sequence length dimensions from input tensors.
+
+    Handles three input layouts:
+    - Regular batched: q has shape (batch_size, seqlen_q, num_head, head_dim).
+    - Variable-length: q has shape (total_q, num_head, head_dim) with cu_seqlens_q
+      providing per-sequence boundaries.
+    - Paged KV cache: k has shape (num_pages, page_size, num_head_kv, head_dim)
+      with page_table mapping batch elements to pages.
+
+    Args:
+        q: Query tensor.
+        k: Key tensor.
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None for
+            regular batched input.
+        cu_seqlens_k: Cumulative sequence lengths for keys, or None.
+        page_table: Page table tensor for paged KV cache, or None.
+
+    Returns:
+        Tuple of (batch_size, seqlen_q, total_q, seqlen_k, num_pages, page_size):
+            batch_size: Number of sequences in the batch.
+            seqlen_q: Query sequence length (None for variable-length input).
+            total_q: Total number of query tokens across all sequences.
+            seqlen_k: Key sequence length (or num_pages * page_size for paged KV).
+            num_pages: Number of KV cache pages (None if not paged).
+            page_size: Size of each KV cache page (None if not paged).
+    """
     num_head, head_dim = q.shape[-2:]
     if cu_seqlens_q is None:
         batch_size, seqlen_q = q.shape[:2]
@@ -279,6 +399,40 @@ def _validate_flash_attn_inputs(
     page_table: Optional[torch.Tensor],
     learnable_sink: Optional[torch.Tensor],
 ):
+    """Validates shapes, dtypes, and device placement of all flash attention inputs.
+
+    Checks that:
+    - K and V tensor shapes are consistent with the input layout (batched,
+      variable-length, or paged KV cache).
+    - cu_seqlens_q/k and seqused_q/k have correct shapes and are int32/contiguous.
+    - All tensors have a supported dtype (float16, bfloat16, float8_e4m3fn, or
+      uint8 for legacy FP8) and matching dtypes across Q, K, V.
+    - All tensors reside on a CUDA device.
+    - num_head is divisible by num_head_kv (for GQA/MQA).
+    - head_dim and head_dim_v satisfy alignment requirements.
+
+    Args:
+        q: Query tensor.
+        k: Key tensor.
+        v: Value tensor.
+        batch_size: Number of sequences in the batch.
+        seqlen_k: Key sequence length.
+        num_head: Number of query attention heads.
+        num_head_kv: Number of key/value attention heads.
+        head_dim: Query/key head dimension.
+        head_dim_v: Value head dimension.
+        num_pages: Number of KV cache pages (None if not paged).
+        page_size: Size of each KV cache page (None if not paged).
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None.
+        cu_seqlens_k: Cumulative sequence lengths for keys, or None.
+        seqused_q: Used sequence lengths for queries, or None.
+        seqused_k: Used sequence lengths for keys, or None.
+        page_table: Page table for paged KV cache, or None.
+        learnable_sink: Learnable sink token weights, or None.
+
+    Raises:
+        AssertionError: If any validation check fails.
+    """
     if cu_seqlens_k is None:
         if page_table is None:
             assert k.shape == (batch_size, seqlen_k, num_head_kv, head_dim)
@@ -346,6 +500,26 @@ def _process_window_and_causal(
     window_size_left: Optional[int],
     window_size_right: Optional[int],
 ):
+    """Normalizes causal and sliding window attention parameters.
+
+    Converts between different representations of attention masking:
+    - causal=True is equivalent to window_size_right=0 (no future tokens).
+    - If window_size_left is None and window_size_right is 0, this is detected
+      as causal attention (not local/sliding window).
+    - Otherwise, if either window size is specified, local (sliding window)
+      masking is used.
+
+    Args:
+        causal: Whether causal masking is requested.
+        window_size_left: Left window size for sliding window attention, or None.
+        window_size_right: Right window size for sliding window attention, or None.
+
+    Returns:
+        Tuple of (causal, local, window_size_right):
+            causal: Whether to use causal masking.
+            local: Whether to use local (sliding window) masking.
+            window_size_right: Possibly updated right window size.
+    """
     if causal:
         window_size_right = 0
     local = window_size_left is not None or window_size_right is not None
@@ -369,6 +543,30 @@ def _adjust_block_sizes_for_compute_capability(
     cu_seqlens_q: Optional[torch.Tensor],
     seqused_q: Optional[torch.Tensor],
 ):
+    """Adjusts block sizes and GQA packing based on GPU compute capability.
+
+    For SM90 (Hopper): Increases n_block_size to 192 when head_dim and head_dim_v
+    are both 128 and attention is non-causal and non-local, for better performance.
+
+    For SM100 (Blackwell): Disables GQA packing when 128 is not divisible by
+    qhead_per_kvhead, or when variable-length inputs are used (cu_seqlens_q or
+    seqused_q is provided).
+
+    Args:
+        compute_capability: GPU SM major version (9 for Hopper, 10 for Blackwell).
+        head_dim: Query/key head dimension.
+        head_dim_v: Value head dimension.
+        causal: Whether causal masking is enabled.
+        local: Whether local (sliding window) masking is enabled.
+        n_block_size: Current N-dimension block size.
+        pack_gqa: Whether GQA packing is currently enabled.
+        qhead_per_kvhead: Number of query heads per key/value head.
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None.
+        seqused_q: Used sequence lengths for queries, or None.
+
+    Returns:
+        Tuple of (n_block_size, pack_gqa) with potentially adjusted values.
+    """
     if compute_capability == 9:  # TODO: tune block size according to hdim
         if head_dim == head_dim_v == 128 and not causal and not local:
             n_block_size = 192
@@ -404,6 +602,48 @@ def _prepare_cute_tensors_and_blockscaling(
     cu_seqlens_sf_q: Optional[torch.Tensor],
     cu_seqlens_sf_k: Optional[torch.Tensor],
 ):
+    """Converts PyTorch tensors to CUTE tensors via DLPack and sets up blockscaling.
+
+    Performs two main tasks:
+    1. Converts all input PyTorch tensors to CUTE tensors using from_dlpack with
+       appropriate alignment and dynamic layout marking for use in CUTE-DSL kernels.
+    2. Detects and configures MXFP8 blockscaling: if scale factor tensors (sfq, sfk)
+       are both provided, blockscaling is enabled. For variable-length blockscaled
+       attention, validates that 128-aligned cumulative sequence lengths for scale
+       factors are provided.
+
+    Args:
+        q: Query tensor.
+        k: Key tensor.
+        v: Value tensor.
+        out: Output tensor.
+        lse: Log-sum-exp tensor, or None.
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None.
+        cu_seqlens_k: Cumulative sequence lengths for keys, or None.
+        seqused_q: Used sequence lengths for queries, or None.
+        seqused_k: Used sequence lengths for keys, or None.
+        learnable_sink: Learnable sink token weights, or None.
+        page_table: Page table for paged KV cache, or None.
+        tile_to_batch_q: Tile-to-batch mapping for queries, or None.
+        tile_to_head_q: Tile-to-head mapping for queries, or None.
+        tile_to_block_q: Tile-to-block mapping for queries, or None.
+        sfq: Scale factor tensor for Q (MXFP8 blockscaling), or None.
+        sfk: Scale factor tensor for K (MXFP8 blockscaling), or None.
+        sfv: Scale factor tensor for V (MXFP8 blockscaling), or None.
+        cu_seqlens_sf_q: 128-aligned cumulative sequence lengths for Q scale
+            factor offsets (varlen MXFP8 only), or None.
+        cu_seqlens_sf_k: 128-aligned cumulative sequence lengths for K/V scale
+            factor offsets (varlen MXFP8 only), or None.
+
+    Returns:
+        A tuple containing all converted CUTE tensors and blockscaling metadata:
+        (dtype, q_tensor, k_tensor, v_tensor, o_tensor, lse_tensor,
+         cu_seqlens_q_tensor, cu_seqlens_k_tensor, seqused_q_tensor,
+         seqused_k_tensor, learnable_sink_tensor, page_table_tensor,
+         tile_to_batch_tensor, tile_to_head_tensor, tile_to_block_tensor,
+         blockscaled, sfq_tensor, sfk_tensor, sfv_tensor,
+         cu_seqlens_sf_q_tensor, cu_seqlens_sf_k_tensor, total_sf_q, total_sf_k).
+    """
     dtype = torch2cute_dtype_map[q.dtype]
     q_tensor, k_tensor, v_tensor, o_tensor = [
         from_dlpack(t.detach(), assumed_align=16).mark_layout_dynamic(
@@ -470,16 +710,16 @@ def _prepare_cute_tensors_and_blockscaling(
     )
 
     # For blockscaled varlen: require pre-computed 128-aligned cu_seqlens for SF offsets
-    # Use ads_mkl.ops.utils.mxfp8_utils.quantize_varlen_mxfp8_sf_only to generate these.
+    # Use quantize_varlen_mxfp8_sf_only to generate these.
     if blockscaled and cu_seqlens_q is not None:
         assert cu_seqlens_sf_q is not None, (
             "For blockscaled varlen attention, cu_seqlens_sf_q must be provided. "
-            "Use ads_mkl.ops.utils.mxfp8_utils.quantize_varlen_mxfp8_sf_only() to generate 128-aligned SF offsets."
+            "Use quantize_varlen_mxfp8_sf_only() to generate 128-aligned SF offsets."
         )
     if blockscaled and cu_seqlens_k is not None:
         assert cu_seqlens_sf_k is not None, (
             "For blockscaled varlen attention, cu_seqlens_sf_k must be provided. "
-            "Use ads_mkl.ops.utils.mxfp8_utils.quantize_varlen_mxfp8_sf_only() to generate 128-aligned SF offsets."
+            "Use quantize_varlen_mxfp8_sf_only() to generate 128-aligned SF offsets."
         )
 
     # Convert SF cu_seqlens to cute tensors
@@ -579,6 +819,57 @@ def _compile_flash_attn_kernel(
     total_sf_q: Optional[int],
     total_sf_k: Optional[int],
 ):
+    """Compiles the flash attention forward kernel with caching.
+
+    On the first call for a given compile_key, creates a FlashAttentionForwardSm100
+    instance and compiles it via cute.compile. Subsequent calls with the same
+    compile_key are no-ops since the compiled kernel is retrieved from compile_cache.
+
+    Args:
+        compile_key: Hashable tuple uniquely identifying the kernel configuration.
+        compile_cache: Dictionary mapping compile_keys to compiled kernel functions.
+        compute_capability: GPU SM major version (currently only 10 is supported).
+        page_size: KV cache page size (must be 128 or None for SM100).
+        head_dim: Query/key head dimension.
+        head_dim_v: Value head dimension.
+        qhead_per_kvhead: Number of query heads per key/value head.
+        causal: Whether causal masking is enabled.
+        local: Whether local (sliding window) masking is enabled.
+        pack_gqa: Whether GQA packing is enabled.
+        cu_seqlens_q: Cumulative sequence lengths for queries (PyTorch tensor), or None.
+        seqused_q: Used sequence lengths for queries (PyTorch tensor), or None.
+        prefer_persistent: Whether to prefer persistent kernel scheduling.
+        activation: Activation function name (e.g., "fast_gelu", "relu", "identity").
+        blockscaled: Whether MXFP8 blockscaling is enabled.
+        sf_vec_size: Scale factor vector size for blockscaling.
+        q_tensor: Query CUTE tensor.
+        k_tensor: Key CUTE tensor.
+        v_tensor: Value CUTE tensor.
+        o_tensor: Output CUTE tensor.
+        lse_tensor: Log-sum-exp CUTE tensor, or None.
+        softmax_scale: Softmax scaling factor.
+        current_stream: CUDA stream to compile/run on.
+        cu_seqlens_q_tensor: Cumulative sequence lengths for queries (CUTE tensor), or None.
+        cu_seqlens_k_tensor: Cumulative sequence lengths for keys (CUTE tensor), or None.
+        seqused_q_tensor: Used sequence lengths for queries (CUTE tensor), or None.
+        seqused_k_tensor: Used sequence lengths for keys (CUTE tensor), or None.
+        max_seqlen_q: Maximum query sequence length, or None.
+        page_table_tensor: Page table CUTE tensor, or None.
+        softcap: Softmax cap value, or None.
+        window_size_left: Left window size for sliding window attention, or None.
+        window_size_right: Right window size for sliding window attention, or None.
+        learnable_sink_tensor: Learnable sink CUTE tensor, or None.
+        tile_to_batch_tensor: Tile-to-batch mapping CUTE tensor, or None.
+        tile_to_head_tensor: Tile-to-head mapping CUTE tensor, or None.
+        tile_to_block_tensor: Tile-to-block mapping CUTE tensor, or None.
+        sfq_tensor: Q scale factor CUTE tensor, or None.
+        sfk_tensor: K scale factor CUTE tensor, or None.
+        sfv_tensor: V scale factor CUTE tensor, or None.
+        cu_seqlens_sf_q_tensor: Q scale factor cumulative lengths CUTE tensor, or None.
+        cu_seqlens_sf_k_tensor: K scale factor cumulative lengths CUTE tensor, or None.
+        total_sf_q: Total padded Q tokens for SF layout, or None.
+        total_sf_k: Total padded K tokens for SF layout, or None.
+    """
     if compile_key not in compile_cache:
         if compute_capability == 10:
             assert page_size in [None, 128], (
@@ -671,6 +962,58 @@ def _flash_attn_fwd(
     cu_seqlens_sf_q: Optional[torch.Tensor] = None,
     cu_seqlens_sf_k: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Core forward pass implementation for flash attention.
+
+    Validates inputs, extracts sequence dimensions, allocates output and LSE
+    tensors, converts all tensors to CUTE format, compiles the forward kernel
+    on the first call (cached for subsequent calls), and launches it on the
+    current CUDA stream.
+
+    Supports batched input, variable-length input (via cu_seqlens), paged KV
+    cache (via page_table), causal and sliding window masking, GQA/MQA, FP8
+    with MXFP8 blockscaling, and configurable activation functions.
+
+    Args:
+        q: Query tensor. Shape (batch, seqlen_q, num_heads, head_dim) for batched,
+            or (total_q, num_heads, head_dim) for variable-length.
+        k: Key tensor. Shape (batch, seqlen_k, num_heads_kv, head_dim) for batched,
+            or (total_k, num_heads_kv, head_dim) for variable-length, or
+            (num_pages, page_size, num_heads_kv, head_dim) for paged KV.
+        v: Value tensor. Same layout as k but with head_dim_v in last dimension.
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None.
+        cu_seqlens_k: Cumulative sequence lengths for keys, or None.
+        seqused_q: Used sequence lengths for queries, or None.
+        seqused_k: Used sequence lengths for keys, or None.
+        max_seqlen_q: Maximum query sequence length, or None.
+        page_table: Page table for paged KV cache, or None.
+        softmax_scale: Softmax scale (default: 1/sqrt(head_dim)).
+        causal: Whether to apply causal masking.
+        softcap: Softmax cap value, or None.
+        window_size_left: Left sliding window size, or None.
+        window_size_right: Right sliding window size, or None.
+        learnable_sink: Learnable sink token weights, or None.
+        m_block_size: Tile size along query sequence dimension.
+        n_block_size: Tile size along key sequence dimension.
+        num_threads: Number of threads per thread block.
+        pack_gqa: Whether to pack GQA heads (auto-detected if None).
+        _compute_capability: Override GPU compute capability (for testing).
+        prefer_persistent: Whether to prefer persistent kernel scheduling.
+        tile_to_batch_q: Precomputed tile-to-batch mapping, or None.
+        tile_to_head_q: Precomputed tile-to-head mapping, or None.
+        tile_to_block_q: Precomputed tile-to-block mapping, or None.
+        activation: Activation function name (e.g., "fast_gelu").
+        sfq: Q scale factor for MXFP8, or None.
+        sfk: K scale factor for MXFP8, or None.
+        sfv: V scale factor for MXFP8, or None.
+        sf_vec_size: Scale factor vector size for MXFP8.
+        cu_seqlens_sf_q: Cumulative sequence lengths for Q scale factors, or None.
+        cu_seqlens_sf_k: Cumulative sequence lengths for K scale factors, or None.
+
+    Returns:
+        Tuple of (out, lse):
+            out: Attention output tensor, same shape as q (with head_dim_v).
+            lse: Log-sum-exp tensor for backward pass, or None if no grad needed.
+    """
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
     batch_size, seqlen_q, total_q, seqlen_k, num_pages, page_size = (
         _extract_sequence_dimensions(q, k, cu_seqlens_q, cu_seqlens_k, page_table)
@@ -943,6 +1286,61 @@ def _flash_attn_bwd(
     prefer_persistent: bool = False,
     activation: str = "fast_gelu",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Core backward pass implementation for flash attention.
+
+    Compiles and launches the backward kernel, which consists of:
+    1. Preprocessing: computes dot product of output and grad_output, converts
+       LSE to log2 scale, and zeros dq_accum.
+    2. Main backward: computes dQ, dK, dV gradients using the recomputation
+       approach (recomputes attention weights from Q, K, softmax_scale, and LSE
+       rather than storing them from the forward pass).
+    3. Postprocessing: converts accumulated gradients to the output dtype.
+
+    Block sizes and kernel parameters are automatically tuned based on GPU
+    compute capability (SM90 vs SM100). For GQA (qhead_per_kvhead > 1),
+    dK and dV are accumulated in float32 before conversion.
+
+    Args:
+        q: Query tensor.
+        k: Key tensor.
+        v: Value tensor.
+        out: Forward pass output tensor.
+        dout: Gradient of the output tensor.
+        lse: Log-sum-exp from the forward pass.
+        softmax_scale: Softmax scale (default: 1/sqrt(head_dim)).
+        causal: Whether causal masking was used in the forward pass.
+        softcap: Softmax cap value (0.0 means no cap).
+        m_block_size: Tile size along query sequence dimension.
+        n_block_size: Tile size along key sequence dimension.
+        num_threads: Number of threads per thread block.
+        pack_gqa: Whether to pack GQA heads.
+        num_stages_Q: Number of pipeline stages for Q loads.
+        num_stages_dO: Number of pipeline stages for dO loads.
+        SdP_swapAB: Whether to swap A/B operands in S*dP GEMM.
+        dKV_swapAB: Whether to swap A/B operands in dK/dV GEMM.
+        dQ_swapAB: Whether to swap A/B operands in dQ GEMM.
+        AtomLayoutMSdP: Atom layout M for S*dP computation.
+        AtomLayoutNdKV: Atom layout N for dK/dV computation.
+        AtomLayoutMdQ: Atom layout M for dQ computation.
+        V_in_regs: Whether to keep V in registers.
+        cu_seqlens_q: Cumulative sequence lengths for queries, or None.
+        cu_seqlens_k: Cumulative sequence lengths for keys, or None.
+        seqused_q: Used sequence lengths for queries, or None.
+        seqused_k: Used sequence lengths for keys, or None.
+        max_seqlen_k: Maximum key sequence length, or None.
+        max_seqlen_q: Maximum query sequence length, or None.
+        tile_to_batch_k: Tile-to-batch mapping for keys, or None.
+        tile_to_head_k: Tile-to-head mapping for keys, or None.
+        tile_to_block_k: Tile-to-block mapping for keys, or None.
+        prefer_persistent: Whether to prefer persistent kernel scheduling.
+        activation: Activation function name (e.g., "fast_gelu").
+
+    Returns:
+        Tuple of (dq, dk, dv):
+            dq: Gradient with respect to queries, same shape as q.
+            dk: Gradient with respect to keys, same shape as k.
+            dv: Gradient with respect to values, same shape as v.
+    """
     compute_capability = torch.cuda.get_device_capability()[0]
     assert compute_capability in [9, 10], (
         "Unsupported compute capability. Supported: 9.x, 10.x"
@@ -1286,6 +1684,17 @@ _flash_attn_bwd.compile_cache_post = {}
 
 
 class FlashAttnFunc(torch.autograd.Function):
+    """PyTorch autograd Function wrapping flash attention forward and backward passes.
+
+    Implements custom forward and backward methods for automatic differentiation.
+    The forward pass calls _flash_attn_fwd and saves tensors needed for the
+    backward pass (q, k, v, out, lse). The backward pass calls _flash_attn_bwd
+    to compute gradients dQ, dK, dV.
+
+    This class is used by flash_attn_func as the underlying autograd mechanism
+    for fixed-length (batched) flash attention.
+    """
+
     @staticmethod
     def forward(
         ctx,
@@ -1340,7 +1749,7 @@ class FlashAttnFunc(torch.autograd.Function):
 
 
 @torch.library.custom_op(
-    "ads_mkl::cutedsl_generalized_dot_product_attention", mutates_args=()
+    "gdpa::cutedsl_generalized_dot_product_attention", mutates_args=()
 )
 def cutedsl_generalized_dot_product_attention(
     q: torch.Tensor,
@@ -1507,7 +1916,7 @@ def _cutedsl_generalized_dot_product_attention_setup_context(ctx, inputs, output
 
 
 @torch.library.custom_op(
-    "ads_mkl::cutedsl_generalized_dot_product_attention_backward", mutates_args=()
+    "gdpa::cutedsl_generalized_dot_product_attention_backward", mutates_args=()
 )
 def cutedsl_generalized_dot_product_attention_backward(
     q: torch.Tensor,
@@ -1585,7 +1994,7 @@ def _cutedsl_generalized_dot_product_attention_backward(ctx, dout, *args):
         tile_to_block_k,
     ) = ctx.saved_tensors
     # q, k, v, out, lse = ctx.saved_tensors
-    dq, dk, dv = torch.ops.ads_mkl.cutedsl_generalized_dot_product_attention_backward(
+    dq, dk, dv = torch.ops.gdpa.cutedsl_generalized_dot_product_attention_backward(
         q,
         k,
         v,
@@ -1617,7 +2026,7 @@ cutedsl_generalized_dot_product_attention.register_autograd(
 
 
 @register_flop_formula(
-    torch.ops.ads_mkl.cutedsl_generalized_dot_product_attention, get_raw=True
+    torch.ops.gdpa.cutedsl_generalized_dot_product_attention, get_raw=True
 )
 def generalized_dot_product_attention_forward_flop(
     q: torch.Tensor,
@@ -1703,7 +2112,7 @@ def generalized_dot_product_attention_forward_flop(
 
 
 @register_flop_formula(
-    torch.ops.ads_mkl.cutedsl_generalized_dot_product_attention_backward, get_raw=True
+    torch.ops.gdpa.cutedsl_generalized_dot_product_attention_backward, get_raw=True
 )
 def generalized_dot_product_attention_backward_flop(
     q: torch.Tensor,
@@ -1766,6 +2175,35 @@ def flash_attn_func(
     pack_gqa: Optional[bool] = None,
     prefer_persistent: bool = False,
 ):
+    """Public API for fixed-length (batched) flash attention.
+
+    Computes scaled dot-product attention using the FlashAttention algorithm
+    with support for causal masking, sliding window attention, GQA/MQA, and
+    softcapping. Supports automatic differentiation via PyTorch autograd.
+
+    Args:
+        q: Query tensor of shape (batch_size, seqlen_q, num_heads, head_dim).
+        k: Key tensor of shape (batch_size, seqlen_k, num_heads_kv, head_dim).
+        v: Value tensor of shape (batch_size, seqlen_k, num_heads_kv, head_dim_v).
+        softmax_scale: Scaling factor for QK^T. Defaults to 1/sqrt(head_dim).
+        causal: If True, applies causal (autoregressive) masking so that each
+            query position can only attend to key positions at or before it.
+        window_size: Tuple of (window_size_left, window_size_right) for sliding
+            window attention. None means no window constraint on that side.
+        learnable_sink: Optional learnable sink token weights of shape (num_heads,).
+        softcap: Soft cap value for attention logits. 0.0 means no cap.
+        pack_gqa: Whether to pack GQA heads for better SM utilization. If None,
+            automatically enabled when num_heads > num_heads_kv.
+        prefer_persistent: Whether to prefer persistent kernel scheduling for
+            better performance on some workloads.
+
+    Returns:
+        Tuple of (out, lse):
+            out: Attention output tensor of shape
+                (batch_size, seqlen_q, num_heads, head_dim_v).
+            lse: Log-sum-exp tensor for the backward pass, or None if no
+                input requires grad.
+    """
     return FlashAttnFunc.apply(
         q,
         k,
@@ -1813,6 +2251,66 @@ def flash_attn_varlen_func(
     cu_seqlens_sf_q: Optional[torch.Tensor] = None,
     cu_seqlens_sf_k: Optional[torch.Tensor] = None,
 ):
+    """Public API for variable-length flash attention.
+
+    Computes scaled dot-product attention for sequences of varying lengths,
+    packed into a single tensor with cumulative sequence length offsets.
+    Supports causal masking, sliding window, GQA/MQA, paged KV cache,
+    FP8 with MXFP8 blockscaling, and load-balanced tile scheduling.
+
+    This function delegates to cutedsl_generalized_dot_product_attention,
+    which is registered as a torch custom op with autograd support.
+
+    Args:
+        q: Query tensor of shape (total_q, num_heads, head_dim), where total_q
+            is the sum of all query sequence lengths in the batch.
+        k: Key tensor of shape (total_k, num_heads_kv, head_dim), or
+            (num_pages, page_size, num_heads_kv, head_dim) for paged KV cache.
+        v: Value tensor, same layout as k but with head_dim_v in last dimension.
+        cu_seqlens_q: Cumulative sequence lengths for queries, int32 tensor of
+            shape (batch_size + 1,). E.g., [0, 128, 256] for 2 sequences of
+            length 128.
+        cu_seqlens_k: Cumulative sequence lengths for keys, int32 tensor of
+            shape (batch_size + 1,).
+        seqused_q: Actual used lengths per query sequence, shape (batch_size,),
+            or None to use full lengths from cu_seqlens_q.
+        seqused_k: Actual used lengths per key sequence, shape (batch_size,),
+            or None to use full lengths from cu_seqlens_k.
+        max_seqlen_q: Maximum query sequence length in the batch.
+        max_seqlen_k: Maximum key sequence length in the batch.
+        page_table: Page table for paged KV cache of shape
+            (batch_size, max_num_pages_per_seq), int32 tensor, or None.
+        softmax_scale: Scaling factor for QK^T. Defaults to 1/sqrt(head_dim).
+        causal: If True, applies causal masking.
+        window_size: Tuple of (window_size_left, window_size_right) for sliding
+            window attention.
+        learnable_sink: Optional learnable sink token weights of shape (num_heads,).
+        softcap: Soft cap value for attention logits. 0.0 means no cap.
+        pack_gqa: Whether to pack GQA heads. Auto-detected if None.
+        prefer_persistent: Whether to prefer persistent kernel scheduling.
+        tile_to_batch_q: Precomputed tile-to-batch mapping for query tiles, or
+            None. Can be generated by precompute_for_varline or
+            precompute_for_varline_load_balancing.
+        tile_to_head_q: Precomputed tile-to-head mapping for query tiles, or None.
+        tile_to_block_q: Precomputed tile-to-block mapping for query tiles, or None.
+        tile_to_batch_k: Precomputed tile-to-batch mapping for key tiles (backward), or None.
+        tile_to_head_k: Precomputed tile-to-head mapping for key tiles (backward), or None.
+        tile_to_block_k: Precomputed tile-to-block mapping for key tiles (backward), or None.
+        activation: Activation function name (e.g., "fast_gelu", "relu", "identity").
+        sfq: Q scale factor tensor for MXFP8 blockscaling, or None.
+        sfk: K scale factor tensor for MXFP8 blockscaling, or None.
+        sfv: V scale factor tensor for MXFP8 blockscaling, or None.
+        sf_vec_size: Scale factor vector size for MXFP8 (default: 32).
+        cu_seqlens_sf_q: 128-aligned cumulative sequence lengths for Q scale
+            factor offsets (varlen MXFP8 only), or None.
+        cu_seqlens_sf_k: 128-aligned cumulative sequence lengths for K/V scale
+            factor offsets (varlen MXFP8 only), or None.
+
+    Returns:
+        Tuple of (out, lse):
+            out: Attention output tensor of shape (total_q, num_heads, head_dim_v).
+            lse: Log-sum-exp tensor for the backward pass.
+    """
     return cutedsl_generalized_dot_product_attention(
         q,
         k,
