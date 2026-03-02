@@ -1,0 +1,134 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+"""Block iteration bounds for flash attention tile scheduling.
+
+Computes the valid range of KV blocks (n_blocks) and query blocks (m_blocks)
+for a given tile, accounting for causal masking, local (sliding window)
+attention, and grouped-query attention (GQA) packing.
+"""
+
+# pyre-ignore-all-errors
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import cutlass
+import cutlass.cute as cute
+from ads_mkl.ops.cute_dsl.gdpa.src.seqlen_info import SeqlenInfoQK
+from cutlass import const_expr, Int32
+
+
+@dataclass(frozen=True)
+class BlockInfo:
+    """Computes valid block iteration ranges for flash attention.
+
+    Given a query tile (m_block), determines which KV tiles (n_blocks)
+    contain non-masked attention scores, enabling skip of fully-masked tiles.
+    """
+
+    tile_m: cutlass.Constexpr[int]
+    tile_n: cutlass.Constexpr[int]
+    is_causal: cutlass.Constexpr[bool]
+    is_local: cutlass.Constexpr[bool] = False
+    window_size_left: Optional[Int32] = None
+    window_size_right: Optional[Int32] = None
+    qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
+
+    @cute.jit
+    def get_n_block_min_max(
+        self, seqlen_info: SeqlenInfoQK, m_block: Int32
+    ) -> Tuple[Int32, Int32]:
+        """Compute the range [n_block_min, n_block_max) of KV blocks to iterate over for a given query block m_block.
+
+        Accounts for causal masking (upper-right triangle), local masking
+        (sliding window), and GQA packing.
+        """
+        n_block_max = cute.ceil_div(seqlen_info.seqlen_k, self.tile_n)
+        if const_expr(
+            self.is_causal or (self.is_local and self.window_size_right is not None)
+        ):
+            m_idx_max = (m_block + 1) * self.tile_m
+            if const_expr(self.qhead_per_kvhead_packgqa > 1):
+                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            n_idx = m_idx_max + seqlen_info.seqlen_k - seqlen_info.seqlen_q
+            n_idx_right = (
+                n_idx if const_expr(self.is_causal) else n_idx + self.window_size_right
+            )
+            n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
+        n_block_min = 0
+        if const_expr(self.is_local and self.window_size_left is not None):
+            m_idx_min = m_block * self.tile_m
+            if const_expr(self.qhead_per_kvhead_packgqa > 1):
+                m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+            n_idx = m_idx_min + seqlen_info.seqlen_k - seqlen_info.seqlen_q
+            n_idx_left = n_idx - self.window_size_left
+            n_block_min = cutlass.max(n_idx_left // self.tile_n, 0)
+        return n_block_min, n_block_max
+
+    @cute.jit
+    def get_m_block_min_max(
+        self, seqlen_info: SeqlenInfoQK, n_block: Int32
+    ) -> Tuple[Int32, Int32]:
+        """Compute the range [m_block_min, m_block_max) of query blocks that have non-zero attention with KV block n_block.
+
+        Used in the backward pass.
+        """
+        m_block_max = cute.ceil_div(seqlen_info.seqlen_q, self.tile_m)
+        m_block_min = 0
+        if const_expr(self.is_causal):
+            m_block_min = max(
+                m_block_min,
+                (n_block * self.tile_n + seqlen_info.seqlen_q - seqlen_info.seqlen_k)
+                // self.tile_m,
+            )
+        return m_block_min, m_block_max
+
+    @cute.jit
+    def get_n_block_min_causal_local_mask(
+        self,
+        seqlen_info: SeqlenInfoQK,
+        m_block: Int32,
+        n_block_min: Int32,
+    ) -> Int32:
+        """If we have separate iterations with causal or local masking at the start, where do we stop"""
+        m_idx_min = m_block * self.tile_m
+        if const_expr(self.qhead_per_kvhead_packgqa > 1):
+            m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+        n_idx = m_idx_min + seqlen_info.seqlen_k - seqlen_info.seqlen_q
+        n_idx_right = (
+            n_idx
+            if const_expr(not self.is_local or self.window_size_right is None)
+            else n_idx + self.window_size_right
+        )
+        return cutlass.max(n_block_min, n_idx_right // self.tile_n)
+
+    @cute.jit
+    def get_n_block_min_before_local_mask(
+        self,
+        seqlen_info: SeqlenInfoQK,
+        m_block: Int32,
+        n_block_min: Int32,
+    ) -> Int32:
+        """If we have separate iterations with local masking at the end, where do we stop the non-masked iterations"""
+        if const_expr(not self.is_local or self.window_size_left is None):
+            return n_block_min
+        else:
+            m_idx_max = (m_block + 1) * self.tile_m
+            if const_expr(self.qhead_per_kvhead_packgqa > 1):
+                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            n_idx = m_idx_max + seqlen_info.seqlen_k - seqlen_info.seqlen_q
+            n_idx_left = n_idx - self.window_size_left
+            return cutlass.max(n_block_min, cute.ceil_div(n_idx_left, self.tile_n))

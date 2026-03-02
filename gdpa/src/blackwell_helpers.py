@@ -1,0 +1,1008 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright (c) 2025, Tri Dao.
+
+# pyre-ignore-all-errors
+from typing import Optional, Tuple, Type
+
+import ads_mkl.ops.cute_dsl.gdpa.src.mma_sm100_desc as sm100_desc
+import cutlass
+import cutlass.cute as cute
+from ads_mkl.ops.cute_dsl.gdpa.src.utils import parse_swizzle_from_pointer
+from cutlass import Boolean, const_expr, Int32
+from cutlass._mlir.dialects import llvm
+from cutlass.cute.nvgpu import tcgen05
+
+
+def make_s2t_copy_partitions(
+    smem_tensor: cute.Tensor,
+    tmem_tensor: cute.Tensor,
+    sf_dtype: Type[cutlass.Numeric],
+) -> Tuple[cute.TiledCopy, cute.Tensor, cute.Tensor]:
+    """
+    Create S2T (SMEM→TMEM) copy partitions for scale factor tensors.
+
+    This is a reusable helper for setting up the S2T copy of scale factors
+    (SFQ, SFK) from shared memory to tensor memory for blockscaled MMA operations.
+
+    Args:
+        smem_tensor: Scale factor tensor in SMEM (e.g., sSFQ or sSFK)
+        tmem_tensor: Scale factor tensor in TMEM (e.g., tCtSFQ or tCtSFK)
+        sf_dtype: Data type for scale factors (typically Float8E8M0FNU)
+
+    Returns:
+        Tuple of (tiled_copy, smem_partition, tmem_partition):
+        - tiled_copy: The tiled copy object needed for cute.copy() calls
+        - smem_partition: SMEM tensor with proper descriptors for S2T copy
+        - tmem_partition: TMEM tensor partitioned for S2T copy destination
+
+    Example:
+        tiled_copy_sfq, tCsSFQ_s2t, tCtSFQ_s2t = make_s2t_copy_partitions(sSFQ, tCtSFQ, self.sf_dtype)
+        tiled_copy_sfk, tCsSFK_s2t, tCtSFK_s2t = make_s2t_copy_partitions(sSFK, tCtSFK, self.sf_dtype)
+
+        # Later, to perform the copy:
+        cute.copy(tiled_copy_sfq, tCsSFQ_s2t[stage], tCtSFQ_s2t)
+    """
+    # Filter zeros from both tensors for compact layout
+    smem_compact = cute.filter_zeros(smem_tensor)
+    tmem_compact = cute.filter_zeros(tmem_tensor)
+
+    # Create S2T copy atom for scale factors
+    copy_atom = cute.make_copy_atom(
+        tcgen05.Cp4x32x128bOp(tcgen05.CtaGroup.ONE), sf_dtype
+    )
+
+    # Build tiled copy and get thread slice
+    tiled_copy = tcgen05.make_s2t_copy(copy_atom, tmem_compact)
+    thr_copy = tiled_copy.get_slice(0)
+
+    # Partition source (SMEM) and destination (TMEM)
+    smem_partition_ = thr_copy.partition_S(smem_compact)
+    smem_partition = tcgen05.get_s2t_smem_desc_tensor(tiled_copy, smem_partition_)
+    tmem_partition = thr_copy.partition_D(tmem_compact)
+
+    return tiled_copy, smem_partition, tmem_partition
+
+
+def dtype_to_mma_kind(dtype: Type[cutlass.Numeric]) -> str:
+    """
+    Map CUTLASS dtype to PTX tcgen05.mma .kind:: qualifier.
+
+    References:
+    - NVIDIA PTX ISA documentation for Blackwell (SM100)
+    - FP8 Attention internal doc: tcgen05.mma .kind qualifiers
+    """
+    if dtype in (cutlass.Float16, cutlass.BFloat16):
+        return "f16"
+    elif dtype in (cutlass.Float8E4M3FN, cutlass.Float8E5M2):
+        return "f8f6f4"
+    else:
+        raise TypeError(f"Unsupported dtype for tcgen05.mma: {dtype}")
+
+
+@cute.jit
+def gemm_w_idx(
+    tiled_mma: cute.TiledMma,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    A_idx: Optional[Int32] = None,
+    B_idx: Optional[Int32] = None,
+    zero_init: bool | Boolean = False,
+    swap_AB: bool = False,
+) -> None:
+    if const_expr(swap_AB):
+        return gemm_w_idx(
+            tiled_mma, acc, tCrB, tCrA, B_idx, A_idx, zero_init=zero_init, swap_AB=False
+        )
+    else:
+        rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+        rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        mma_atom = cute.make_mma_atom(tiled_mma.op)
+        for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
+            mma_atom.set(tcgen05.Field.ACCUMULATE, not zero_init or k != 0)
+            cute.gemm(mma_atom, acc, rA[None, None, k], rB[None, None, k], acc)
+
+
+@cute.jit
+def gemm_ptx_w_idx(
+    tiled_mma: cute.TiledMma,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    sA: Optional[cute.Tensor],
+    sB: cute.Tensor,
+    A_idx: Optional[Int32] = None,
+    B_idx: Optional[Int32] = None,
+    zero_init: bool | Boolean = False,
+) -> None:
+    rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+    rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+    sA_cur = None
+    if const_expr(sA is not None):
+        sA_cur = sA if const_expr(A_idx is None) else sA[None, None, None, A_idx]
+    sB_cur = sB if const_expr(B_idx is None) else sB[None, None, None, B_idx]
+    mma_atom = cute.make_mma_atom(tiled_mma.op)
+    acc_tmem_addr = acc.iterator.toint()
+    gemm_ptx_partial(
+        mma_atom.op, acc_tmem_addr, rA, rB, sA_cur, sB_cur, zero_init=zero_init
+    )
+
+
+@cute.jit
+def gemm(
+    tiled_mma: cute.TiledMma,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    zero_init: bool | Boolean = False,
+) -> cute.TiledMma:
+    for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
+        tiled_mma.set(tcgen05.Field.ACCUMULATE, not zero_init or k != 0)
+        cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+    return tiled_mma
+
+
+def i64_to_i32x2(i: int) -> Tuple[int, int]:
+    """Convert a 64-bit integer to a tuple of two 32-bit integers."""
+    return i & 0xFFFF_FFFF, (i >> 32) & 0xFFFF_FFFF
+
+
+@cute.jit
+def gemm_ptx(
+    op: cute.nvgpu.tcgen05.mma.MmaOp,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    sA: Optional[cute.Tensor],
+    sB: cute.Tensor,
+    zero_init: bool | Boolean = False,
+) -> None:
+    is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
+    if const_expr(not is_ts):
+        assert sA is not None, "sA must be provided when a_src is not TMEM"
+    sA_layout = sA.layout if sA is not None else None
+    sB_layout = sB.layout
+    idesc: int = const_expr(sm100_desc.mma_op_to_idesc(op))
+    mma_kind = const_expr(dtype_to_mma_kind(op.a_dtype))
+    if const_expr(not is_ts):
+        sA_swizzle = parse_swizzle_from_pointer(sA.iterator)
+        smem_desc_base_a: int = const_expr(
+            sm100_desc.make_smem_desc_base(
+                cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
+                sA_swizzle,
+                sm100_desc.Major.K
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
+                else sm100_desc.Major.MN,
+            )
+        )
+        smem_desc_base_a_lo, smem_desc_a_hi = i64_to_i32x2(smem_desc_base_a)
+        smem_desc_base_a_lo = const_expr(smem_desc_base_a_lo)
+        smem_desc_a_hi = const_expr(smem_desc_a_hi)
+    else:
+        smem_desc_base_a = None
+        smem_desc_base_a_lo, smem_desc_a_hi = None, None
+    sB_swizzle = parse_swizzle_from_pointer(sB.iterator)
+    smem_desc_base_b: int = const_expr(
+        sm100_desc.make_smem_desc_base(
+            cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
+            sB_swizzle,
+            sm100_desc.Major.K
+            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            else sm100_desc.Major.MN,
+        )
+    )
+    smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
+    smem_desc_base_b_lo = const_expr(smem_desc_base_b_lo)
+    smem_desc_b_hi = const_expr(smem_desc_b_hi)
+
+    if const_expr(not is_ts):
+        smem_desc_start_a_lo = Int32(
+            smem_desc_base_a_lo
+        ) | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
+    else:
+        smem_desc_start_a_lo = None
+    smem_desc_start_b_lo = Int32(
+        smem_desc_base_b_lo
+    ) | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
+    for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
+        if const_expr(not is_ts):
+            smem_desc_a_lo = smem_desc_start_a_lo + (
+                (cute.crd2idx((0, 0, k), sA_layout) * sA.element_type.width // 8) >> 4
+            )
+        smem_desc_b_lo = smem_desc_start_b_lo + (
+            (cute.crd2idx((0, 0, k), sB_layout) * sB.element_type.width // 8) >> 4
+        )
+        # with cute.arch.elect_one():
+        #     cute.printf("smem_desc_a_lo = {}, smem_desc_b_lo = {}", smem_desc_a_lo, smem_desc_b_lo)
+        #     cute.printf("smem_desc_a_lo_correct = {}, smem_desc_b_lo_correct = {}", smem_desc_a_lo_correct, smem_desc_b_lo_correct)
+        with cute.arch.elect_one():
+            if const_expr(not is_ts):
+                llvm.inline_asm(
+                    None,
+                    [
+                        acc.iterator.toint().ir_value(),
+                        smem_desc_a_lo.ir_value(),
+                        smem_desc_b_lo.ir_value(),
+                        Int32(not zero_init or k != 0).ir_value(),
+                    ],
+                    "{\n\t"
+                    ".reg .pred p;\n\t"
+                    ".reg .b64 smem_desc_a, smem_desc_b;\n\t"
+                    ".reg .b32 idesc;\n\t"
+                    f"mov.b32 idesc, {hex(idesc)};\n\t"
+                    f"mov.b64 smem_desc_a, {{$1, {hex(smem_desc_a_hi)}}};\n\t"
+                    f"mov.b64 smem_desc_b, {{$2, {hex(smem_desc_b_hi)}}};\n\t"
+                    "setp.ne.b32 p, $3, 0;\n\t"
+                    f"tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], smem_desc_a, smem_desc_b, idesc, p;\n\t"
+                    "}\n",
+                    "r,r,r,r",
+                    has_side_effects=True,
+                    is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT,
+                )
+            else:
+                llvm.inline_asm(
+                    None,
+                    [
+                        acc.iterator.toint().ir_value(),
+                        tCrA[None, None, k].iterator.toint().ir_value(),
+                        smem_desc_b_lo.ir_value(),
+                        Int32(not zero_init or k != 0).ir_value(),
+                    ],
+                    "{\n\t"
+                    ".reg .pred p;\n\t"
+                    ".reg .b64 smem_desc_b;\n\t"
+                    f"mov.b64 smem_desc_b, {{$2, {hex(smem_desc_b_hi)}}};\n\t"
+                    "setp.ne.b32 p, $3, 0;\n\t"
+                    f"tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], [$1], smem_desc_b, {hex(idesc)}, p;\n\t"
+                    "}\n",
+                    "r,r,r,r",
+                    has_side_effects=True,
+                    is_align_stack=False,
+                    asm_dialect=llvm.AsmDialect.AD_ATT,
+                )
+
+
+@cute.jit
+def gemm_ptx_loop(
+    op: cute.nvgpu.tcgen05.mma.MmaOp,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    sA: Optional[cute.Tensor],
+    sB: cute.Tensor,
+    zero_init: bool | Boolean = False,
+) -> None:
+    is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
+    if const_expr(not is_ts):
+        assert sA is not None, "sA must be provided when a_src is not TMEM"
+    sA_layout = sA.layout if sA is not None else tCrA.layout
+    sB_layout = sB.layout
+    idesc: int = const_expr(sm100_desc.mma_op_to_idesc(op))
+    mma_kind = const_expr(dtype_to_mma_kind(op.a_dtype))
+    if const_expr(not is_ts):
+        sA_swizzle = parse_swizzle_from_pointer(sA.iterator)
+        smem_desc_base_a: int = const_expr(
+            sm100_desc.make_smem_desc_base(
+                cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
+                sA_swizzle,
+                sm100_desc.Major.K
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
+                else sm100_desc.Major.MN,
+            )
+        )
+        smem_desc_base_a_lo, smem_desc_a_hi = i64_to_i32x2(smem_desc_base_a)
+        smem_desc_base_a_lo = const_expr(smem_desc_base_a_lo)
+        smem_desc_a_hi = const_expr(smem_desc_a_hi)
+    else:
+        smem_desc_base_a = None
+        smem_desc_base_a_lo, smem_desc_a_hi = None, None
+    sB_swizzle = parse_swizzle_from_pointer(sB.iterator)
+    smem_desc_base_b: int = const_expr(
+        sm100_desc.make_smem_desc_base(
+            cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
+            sB_swizzle,
+            sm100_desc.Major.K
+            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            else sm100_desc.Major.MN,
+        )
+    )
+    smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
+    smem_desc_base_b_lo = const_expr(smem_desc_base_b_lo)
+    smem_desc_b_hi = const_expr(smem_desc_b_hi)
+
+    if const_expr(not is_ts):
+        offset_a = [
+            (cute.crd2idx((0, 0, k), sA_layout) * sA.element_type.width // 8) >> 4
+            for k in cutlass.range_constexpr(cute.size(tCrA.shape[2]))
+        ]
+    else:
+        offset_a = [
+            cute.crd2idx((0, 0, k), sA_layout) * op.a_dtype.width // 32
+            for k in cutlass.range_constexpr(cute.size(tCrA.shape[2]))
+        ]
+    offset_a_diff = [
+        offset_a[k] - offset_a[k - 1]
+        for k in cutlass.range_constexpr(1, cute.size(tCrA.shape[2]))
+    ]
+    offset_b = [
+        (cute.crd2idx((0, 0, k), sB_layout) * sB.element_type.width // 8) >> 4
+        for k in cutlass.range_constexpr(cute.size(tCrB.shape[2]))
+    ]
+    offset_b_diff = [
+        offset_b[k] - offset_b[k - 1]
+        for k in cutlass.range_constexpr(1, cute.size(tCrB.shape[2]))
+    ]
+
+    if const_expr(not is_ts):
+        smem_desc_start_a_lo = Int32(
+            smem_desc_base_a_lo
+            | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
+        )
+    else:
+        smem_desc_start_a_lo = None
+    smem_desc_start_b_lo = Int32(
+        smem_desc_base_b_lo
+        | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
+    )
+    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    if const_expr(not is_ts):
+        llvm.inline_asm(
+            None,
+            [
+                acc.iterator.toint().ir_value(),
+                Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
+                Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+                Int32(not zero_init).ir_value(),
+            ],
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 smem_desc_a_lo, smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_a_hi, smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_a, smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            "mov.b32 smem_desc_a_lo, $1;\n\t"
+            "mov.b32 smem_desc_b_lo, $2;\n\t"
+            f"mov.b32 smem_desc_a_hi, {hex(smem_desc_a_hi)};\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $3, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], smem_desc_a, smem_desc_b, idesc, {pred_str};\n\t"
+            + "".join(
+                (
+                    f"add.u32 smem_desc_a_lo, smem_desc_a_lo, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], smem_desc_a, smem_desc_b, idesc, 1;\n\t"
+                )
+                for k in cutlass.range_constexpr(1, cute.size(tCrA.shape[2]))
+            )
+            + "}\n",
+            "r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    else:
+        llvm.inline_asm(
+            None,
+            [
+                acc.iterator.toint().ir_value(),
+                Int32(tCrA[None, None, 0].iterator.toint()).ir_value(),
+                Int32(smem_desc_start_b_lo).ir_value(),
+                Int32(not zero_init).ir_value(),
+            ],
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 tmem_a;\n\t"
+            ".reg .b32 smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            "mov.b32 tmem_a, $1;\n\t"
+            "mov.b32 smem_desc_b_lo, $2;\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $3, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], [tmem_a], smem_desc_b, idesc, {pred_str};\n\t"
+            + "".join(
+                (
+                    # f"add.u32 tmem_a, tmem_a, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    # f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], [tmem_a], smem_desc_b, idesc, 1;\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], [tmem_a + {hex(offset_a[k])}], smem_desc_b, idesc, 1;\n\t"
+                )
+                for k in cutlass.range_constexpr(1, cute.size(tCrA.shape[2]))
+            )
+            + "}\n",
+            "r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+
+
+@cute.jit
+def gemm_ptx_partial(
+    op: cute.nvgpu.tcgen05.mma.MmaOp,
+    acc_tmem_addr: Int32,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    sA: Optional[cute.Tensor],
+    sB: cute.Tensor,
+    mbar_ptr: Optional[cutlass.Pointer] = None,
+    mbar_phase: Optional[Int32] = None,
+    zero_init: bool | Boolean = False,
+) -> None:
+    is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
+    if const_expr(not is_ts):
+        assert sA is not None, "sA must be provided when a_src is not TMEM"
+    sA_layout = sA.layout if sA is not None else tCrA.layout
+    sB_layout = sB.layout
+    idesc: int = const_expr(sm100_desc.mma_op_to_idesc(op))
+    mma_kind = const_expr(dtype_to_mma_kind(op.a_dtype))
+    if const_expr(not is_ts):
+        sA_swizzle = parse_swizzle_from_pointer(sA.iterator)
+        smem_desc_base_a: int = const_expr(
+            sm100_desc.make_smem_desc_base(
+                cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
+                sA_swizzle,
+                sm100_desc.Major.K
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
+                else sm100_desc.Major.MN,
+            )
+        )
+        smem_desc_base_a_lo, smem_desc_a_hi = i64_to_i32x2(smem_desc_base_a)
+        smem_desc_base_a_lo = const_expr(smem_desc_base_a_lo)
+        smem_desc_a_hi = const_expr(smem_desc_a_hi)
+    else:
+        smem_desc_base_a = None
+        smem_desc_base_a_lo, smem_desc_a_hi = None, None
+    sB_swizzle = parse_swizzle_from_pointer(sB.iterator)
+    smem_desc_base_b: int = const_expr(
+        sm100_desc.make_smem_desc_base(
+            cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
+            sB_swizzle,
+            sm100_desc.Major.K
+            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            else sm100_desc.Major.MN,
+        )
+    )
+    smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
+    smem_desc_base_b_lo = const_expr(smem_desc_base_b_lo)
+    smem_desc_b_hi = const_expr(smem_desc_b_hi)
+
+    tCrA_layout = (
+        tCrA.layout
+        if const_expr(not is_ts)
+        else cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
+    )
+    offset_a = [
+        cute.crd2idx((0, 0, k), tCrA_layout) for k in range(cute.size(tCrA.shape[2]))
+    ]
+    offset_a_diff = [
+        offset_a[k] - offset_a[k - 1] for k in range(1, cute.size(tCrA.shape[2]))
+    ]
+    offset_b = [
+        cute.crd2idx((0, 0, k), tCrB.layout) for k in range(cute.size(tCrB.shape[2]))
+    ]
+    offset_b_diff = [
+        offset_b[k] - offset_b[k - 1] for k in range(1, cute.size(tCrB.shape[2]))
+    ]
+
+    if const_expr(not is_ts):
+        smem_desc_start_a_lo = Int32(
+            smem_desc_base_a_lo
+            | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
+        )
+    else:
+        smem_desc_start_a_lo = None
+    smem_desc_start_b_lo = Int32(
+        smem_desc_base_b_lo
+        | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
+    )
+    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+
+    if const_expr(not is_ts):
+        assert mbar_ptr is None, "mbar_ptr must be None when a_src is not TMEM"
+        llvm.inline_asm(
+            None,
+            [
+                # acc.iterator.toint().ir_value(),
+                Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
+                Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+                Int32(not zero_init).ir_value(),
+                Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value(),
+            ],
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 tmem_acc;\n\t"
+            ".reg .b32 smem_desc_a_lo, smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_a_hi, smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_a, smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            # f"mov.b32 tmem_acc, {hex(acc_tmem_addr)};\n\t"
+            f"mov.b32 tmem_acc, $3;\n\t"
+            "mov.b32 smem_desc_a_lo, $0;\n\t"
+            "mov.b32 smem_desc_b_lo, $1;\n\t"
+            f"mov.b32 smem_desc_a_hi, {hex(smem_desc_a_hi)};\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $2, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], smem_desc_a, smem_desc_b, idesc, {pred_str};\n\t"
+            + "".join(
+                (
+                    f"add.u32 smem_desc_a_lo, smem_desc_a_lo, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], smem_desc_a, smem_desc_b, idesc, 1;\n\t"
+                )
+                for k in range(1, cute.size(tCrA.shape[2]))
+            )
+            + "}\n",
+            # "r,r,r",
+            "r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    else:
+        input_args = [
+            Int32(
+                cute.arch.make_warp_uniform(tCrA[None, None, 0].iterator.toint())
+            ).ir_value(),
+            Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+            Int32(not zero_init).ir_value(),
+            Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value(),
+        ]
+        if const_expr(mbar_ptr is not None):
+            assert mbar_phase is not None, (
+                "mbar_phase must be provided when mbar_ptr is not None"
+            )
+            input_args.append(mbar_ptr.toint().ir_value())
+            input_args.append(Int32(mbar_phase).ir_value())
+            mbar_wait_str = (
+                ".reg .pred P1; \n\t"
+                "LAB_WAIT: \n\t"
+                # "mbarrier.try_wait.parity.shared::cta.b64 P1, [$3], $4, 10000000; \n\t"
+                "mbarrier.try_wait.parity.shared::cta.b64 P1, [$4], $5, 10000000; \n\t"
+                "@P1 bra DONE; \n\t"
+                "bra     LAB_WAIT; \n\t"
+                "DONE: \n\t"
+            )
+        else:
+            mbar_wait_str = ""
+        llvm.inline_asm(
+            None,
+            # [
+            #     # acc.iterator.toint().ir_value(),
+            #     Int32(tCrA[None, None, 0].iterator.toint()).ir_value(),
+            #     Int32(smem_desc_start_b_lo).ir_value(),
+            #     Int32(not zero_init).ir_value(),
+            # ],
+            input_args,
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 tmem_acc;\n\t"
+            ".reg .b32 tmem_a;\n\t"
+            ".reg .b32 smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            # f"mov.b32 tmem_acc, {hex(acc_tmem_addr)};\n\t"
+            f"mov.b32 tmem_acc, $3;\n\t"
+            f"mov.b32 tmem_a, $0;\n\t"
+            f"mov.b32 smem_desc_b_lo, $1;\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $2, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], [tmem_a], smem_desc_b, idesc, {pred_str};\n\t"
+            + "".join(
+                (
+                    # f"add.u32 tmem_a, tmem_a, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    # f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], [tmem_a], smem_desc_b, idesc, 1;\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], [tmem_a + {hex(offset_a[k])}], smem_desc_b, idesc, 1;\n\t"
+                )
+                for k in range(
+                    1,
+                    cute.size(tCrA.shape[2])
+                    if const_expr(mbar_ptr is None)
+                    else cute.size(tCrA.shape[2]) // 4 * 3,
+                )
+            )
+            + mbar_wait_str
+            + (
+                "".join(
+                    (
+                        f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                        f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                        f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], [tmem_a + {hex(offset_a[k])}], smem_desc_b, idesc, 1;\n\t"
+                    )
+                    for k in range(
+                        cute.size(tCrA.shape[2]) // 4 * 3, cute.size(tCrA.shape[2])
+                    )
+                )
+                if const_expr(mbar_ptr is not None)
+                else ""
+            )
+            + "}\n",
+            # "r,r,r" if const_expr(mbar_ptr is None) else "r,r,r,r,r",
+            "r,r,r,r" if const_expr(mbar_ptr is None) else "r,r,r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+
+
+@cute.jit
+def gemm_ptx_partial1(
+    op: cute.nvgpu.tcgen05.mma.MmaOp,
+    acc_tmem_addr: cutlass.Constexpr[int],
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    sA_base_addr_for_desc: Int32,
+    sA_addr_offset_for_desc: cutlass.Constexpr[int],
+    sA_stage: Int32,
+    sB_base_addr_for_desc: Int32,
+    sB_addr_offset_for_desc: cutlass.Constexpr[int],
+    sB_stage: Int32,
+    sA_layout: Optional[cute.Layout],
+    sB_layout: Optional[cute.Layout],
+    sA_swizzle: Optional[cute.Swizzle],
+    sB_swizzle: cute.Swizzle,
+    zero_init: bool | Boolean = False,
+) -> None:
+    is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
+    if const_expr(not is_ts):
+        assert sA_layout is not None, (
+            "sA_layout must be provided when a_src is not TMEM"
+        )
+        assert sA_swizzle is not None, (
+            "sA_swizzle must be provided when a_src is not TMEM"
+        )
+    idesc: int = const_expr(sm100_desc.mma_op_to_idesc(op))
+    mma_kind = const_expr(dtype_to_mma_kind(op.a_dtype))
+    if const_expr(not is_ts):
+        smem_desc_base_a: int = const_expr(
+            sm100_desc.make_smem_desc_base(
+                cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
+                sA_swizzle,
+                sm100_desc.Major.K
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
+                else sm100_desc.Major.MN,
+            )
+        )
+        smem_desc_base_a_lo, smem_desc_a_hi = i64_to_i32x2(smem_desc_base_a)
+        smem_desc_base_a_lo = const_expr(smem_desc_base_a_lo)
+        smem_desc_a_hi = const_expr(smem_desc_a_hi)
+    else:
+        smem_desc_base_a = None
+        smem_desc_base_a_lo, smem_desc_a_hi = None, None
+    smem_desc_base_b: int = const_expr(
+        sm100_desc.make_smem_desc_base(
+            cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
+            sB_swizzle,
+            sm100_desc.Major.K
+            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            else sm100_desc.Major.MN,
+        )
+    )
+    smem_desc_base_b_lo, smem_desc_b_hi = i64_to_i32x2(smem_desc_base_b)
+    smem_desc_base_b_lo = const_expr(smem_desc_base_b_lo)
+    smem_desc_b_hi = const_expr(smem_desc_b_hi)
+    mask = [Int32(0)] * 4
+
+    if const_expr(not is_ts):
+        offset_a = [
+            (cute.crd2idx((0, 0, k), sA_layout) * op.a_dtype.width // 8) >> 4
+            for k in range(cute.size(tCrA.shape[2]))
+        ]
+    else:
+        offset_a = [
+            cute.crd2idx((0, 0, k), sA_layout) * op.a_dtype.width // 32
+            for k in range(cute.size(tCrA.shape[2]))
+        ]
+    offset_a_diff = [
+        offset_a[k] - offset_a[k - 1] for k in range(1, cute.size(tCrA.shape[2]))
+    ]
+    offset_b = [
+        (cute.crd2idx((0, 0, k), sB_layout) * op.b_dtype.width // 8) >> 4
+        for k in range(cute.size(tCrB.shape[2]))
+    ]
+    offset_b_diff = [
+        offset_b[k] - offset_b[k - 1] for k in range(1, cute.size(tCrB.shape[2]))
+    ]
+
+    if const_expr(not is_ts):
+        # smem_desc_start_a_lo = Int32(smem_desc_base_a_lo | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator))
+        smem_desc_start_a_lo = const_expr(smem_desc_base_a_lo)
+    else:
+        smem_desc_start_a_lo = None
+    # smem_desc_start_b_lo = Int32(smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
+    smem_desc_start_b_lo = const_expr(smem_desc_base_b_lo)
+    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    if const_expr(not is_ts):
+        llvm.inline_asm(
+            None,
+            [
+                # acc.iterator.toint().ir_value(),
+                # Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
+                Int32(sA_base_addr_for_desc).ir_value(),
+                Int32(sA_stage).ir_value(),
+                # Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+                Int32(sB_base_addr_for_desc).ir_value(),
+                Int32(sB_stage).ir_value(),
+                Int32(not zero_init).ir_value(),
+                mask[0].ir_value(),
+                mask[1].ir_value(),
+                mask[2].ir_value(),
+                mask[3].ir_value(),
+            ],
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 tmem_acc;\n\t"
+            ".reg .b32 smem_desc_a_lo, smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_a_hi, smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_a, smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            f"mov.b32 tmem_acc, {hex(acc_tmem_addr)};\n\t"
+            # "mov.b32 smem_desc_a_lo, $0;\n\t"
+            # f"add.u32 smem_desc_a_lo, $0, {hex(smem_desc_start_a_lo)};\n\t"
+            f"mad.lo.u32 smem_desc_a_lo, $1, {hex(sA_addr_offset_for_desc)}, $0;\n\t"
+            # "mov.b32 smem_desc_b_lo, $2;\n\t"
+            f"mad.lo.u32 smem_desc_b_lo, $3, {hex(sB_addr_offset_for_desc)}, $2;\n\t"
+            f"mov.b32 smem_desc_a_hi, {hex(smem_desc_a_hi)};\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $4, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], smem_desc_a, smem_desc_b, idesc, {{$5, $6, $7, $8}}, {pred_str};\n\t"
+            + "".join(
+                (
+                    f"add.u32 smem_desc_a_lo, smem_desc_a_lo, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_a, {{smem_desc_a_lo, smem_desc_a_hi}};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [tmem_acc], smem_desc_a, smem_desc_b, idesc, {{$5, $6, $7, $8}}, 1;\n\t"
+                )
+                for k in range(1, cute.size(tCrA.shape[2]))
+            )
+            + "}\n",
+            "r,r,r,r,r,r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    else:
+        llvm.inline_asm(
+            None,
+            [
+                # acc.iterator.toint().ir_value(),
+                Int32(tCrA[None, None, 0].iterator.toint()).ir_value(),
+                Int32(smem_desc_start_b_lo).ir_value(),
+                Int32(not zero_init).ir_value(),
+                mask[0].ir_value(),
+                mask[1].ir_value(),
+                mask[2].ir_value(),
+                mask[3].ir_value(),
+            ],
+            "{\n\t"
+            ".reg .pred leader_thread;\n\t"
+            ".reg .pred p;\n\t"
+            ".reg .b32 idesc;\n\t"
+            ".reg .b32 tmem_a;\n\t"
+            ".reg .b32 smem_desc_b_lo;\n\t"
+            ".reg .b32 smem_desc_b_hi;\n\t"
+            ".reg .b64 smem_desc_b;\n\t"
+            "elect.sync _|leader_thread, -1;\n\t"
+            f"mov.b32 idesc, {hex(idesc)};\n\t"
+            f"mov.b32 tmem_a, $1;\n\t"
+            f"mov.b32 smem_desc_b_lo, $2;\n\t"
+            f"mov.b32 smem_desc_b_hi, {hex(smem_desc_b_hi)};\n\t"
+            f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+            "setp.ne.b32 p, $3, 0;\n\t"
+            f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], [tmem_a], smem_desc_b, idesc, {{$4, $5, $6, $7}}, {pred_str};\n\t"
+            + "".join(
+                (
+                    f"add.u32 tmem_a, tmem_a, {hex(offset_a_diff[k - 1])};\n\t"
+                    f"add.u32 smem_desc_b_lo, smem_desc_b_lo, {hex(offset_b_diff[k - 1])};\n\t"
+                    f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
+                    f"@leader_thread tcgen05.mma.cta_group::1.kind::{mma_kind} [$0], [tmem_a], smem_desc_b, idesc, {{$4, $5, $6, $7}}, 1;\n\t"
+                )
+                for k in range(1, cute.size(tCrA.shape[2]))
+            )
+            + "}\n",
+            "r,r,r,r,r,r,r,r",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+
+
+@cute.jit
+def gemm_blockscaled(
+    tiled_mma: cute.TiledMma,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    tCtSFA: cute.Tensor,
+    tCtSFB: cute.Tensor,
+    zero_init: bool | Boolean = False,
+) -> None:
+    """
+    Blockscaled GEMM using CUTE high-level APIs instead of raw PTX.
+
+    This function performs a blockscaled matrix multiplication using the CUTE
+    `tiled_mma.set()` API to properly set scale factor addresses per K iteration,
+    then calls `cute.gemm()`.
+
+    This approach correctly handles the scale factor TMEM addresses that need
+    to be incremented for each K phase iteration, which the raw PTX approach
+    (`gemm_ptx_partial_blockscaled`) was not doing correctly.
+
+    Args:
+        tiled_mma: TiledMma object configured for blockscaled MMA operations.
+        acc: Accumulator tensor in TMEM (destination).
+        tCrA: Fragment tensor for operand A (contains layout info, TMEM for TS mode).
+        tCrB: Fragment tensor for operand B (contains layout info).
+        tCtSFA: TMEM tensor for scale factor A with layout (MMA, MMA_M, MMA_K).
+                The K dimension is indexed per K phase iteration.
+        tCtSFB: TMEM tensor for scale factor B with layout (MMA, MMA_N, MMA_K).
+                The K dimension is indexed per K phase iteration.
+        zero_init: Whether to zero-initialize the accumulator for the first iteration.
+
+    Example usage:
+        # Create TMEM tensors for scale factors using blockscaled_utils
+        tCtSFQ = cute.make_tensor(sf_tmem_ptr, tCtSFQ_layout)
+        tCtSFK = cute.make_tensor(sfk_tmem_ptr, tCtSFK_layout)
+
+        # Call blockscaled GEMM
+        gemm_blockscaled(
+            tiled_mma, tCtAcc, tCrA, tCrB, tCtSFQ, tCtSFK, zero_init=True
+        )
+    """
+    # Number of K phases in the MMA operation
+    num_kphases = cute.size(tCrA.shape[2])
+
+    # Use cutlass.range with unroll_full=True instead of range_constexpr
+    # This properly handles SSA value threading for tiled_mma.set() operations
+    for kphase_idx in cutlass.range(num_kphases, unroll_full=True):
+        kphase_coord = (None, None, kphase_idx)
+
+        # Use tensor slicing like QUACK does
+        sf_kphase_coord = (None, None, kphase_idx)
+
+        tiled_mma.set(
+            tcgen05.Field.SFA,
+            tCtSFA[sf_kphase_coord].iterator,
+        )
+        tiled_mma.set(
+            tcgen05.Field.SFB,
+            tCtSFB[sf_kphase_coord].iterator,
+        )
+
+        # Set ACCUMULATE BEFORE gemm
+        # For first K phase: accumulate = not zero_init (use existing acc if not zero_init)
+        # For subsequent K phases: always accumulate
+        if kphase_idx == 0:
+            tiled_mma.set(tcgen05.Field.ACCUMULATE, not zero_init)
+        else:
+            tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+
+        # Perform the MMA operation for this K phase
+        cute.gemm(
+            tiled_mma,
+            acc,
+            tCrA[kphase_coord],
+            tCrB[kphase_coord],
+            acc,
+        )
+
+
+@cute.jit
+def gemm_blockscaled_w_idx(
+    tiled_mma: cute.TiledMma,
+    acc: cute.Tensor,
+    tCrA: cute.Tensor,
+    tCrB: cute.Tensor,
+    tCtSFA: cute.Tensor,
+    tCtSFB: cute.Tensor,
+    A_idx: Optional[Int32] = None,
+    B_idx: Optional[Int32] = None,
+    zero_init: bool | Boolean = False,
+) -> None:
+    """
+    Blockscaled GEMM with optional stage indices for A and B operands.
+
+    Similar to gemm_blockscaled but supports indexing into staged tensors,
+    useful for pipelined kernels where A and B are loaded in stages.
+
+    Args:
+        tiled_mma: TiledMma object configured for blockscaled MMA operations.
+        acc: Accumulator tensor in TMEM (destination).
+        tCrA: Fragment tensor for operand A with optional stage dimension.
+        tCrB: Fragment tensor for operand B with optional stage dimension.
+        tCtSFA: TMEM tensor for scale factor A with layout (MMA, MMA_M, MMA_K).
+        tCtSFB: TMEM tensor for scale factor B with layout (MMA, MMA_N, MMA_K).
+        A_idx: Optional stage index for operand A.
+        B_idx: Optional stage index for operand B.
+        zero_init: Whether to zero-initialize the accumulator for the first iteration.
+    """
+    # Get the tensors for the specified stage indices
+    rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+    rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+
+    # Number of K phases in the MMA operation
+    num_kphases = cute.size(rA.shape[2])
+
+    for kphase_idx in cutlass.range_constexpr(num_kphases):
+        # Set the ACCUMULATE field BEFORE gemm
+        # Zero-init only for first iteration if requested
+        if kphase_idx == 0:
+            tiled_mma.set(tcgen05.Field.ACCUMULATE, not zero_init)
+        else:
+            tiled_mma.set(tcgen05.Field.ACCUMULATE, True)
+
+        # Set scale factor addresses for this K phase iteration
+        sf_kphase_coord = (None, None, kphase_idx)
+        tiled_mma.set(
+            tcgen05.Field.SFA,
+            tCtSFA[sf_kphase_coord].iterator,
+        )
+        tiled_mma.set(
+            tcgen05.Field.SFB,
+            tCtSFB[sf_kphase_coord].iterator,
+        )
+
+        # Perform the MMA operation for this K phase
+        cute.gemm(
+            tiled_mma,
+            acc,
+            rA[None, None, kphase_idx],
+            rB[None, None, kphase_idx],
+            acc,
+        )
