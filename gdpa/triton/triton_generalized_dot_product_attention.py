@@ -2533,87 +2533,47 @@ def _gdpa_bwd_compute(
 
 
 @triton.jit  # pragma: no cover
-# pyre-ignore[3]: Return type is not specified.
 def _gdpa_bwd(
     ensemble_activation_list: "VAR_ARGS_ARRAY",
-    # pyre-ignore[2]: Parameter `Q` has no type specified.
-    Q,
-    # pyre-ignore[2]: Parameter `Q_offsets` has no type specified.
-    Q_offsets,
-    # pyre-ignore[2]: Parameter `K` has no type specified.
-    K,
-    # pyre-ignore[2]: Parameter `K_offsets` has no type specified.
-    K_offsets,
-    # pyre-ignore[2]: Parameter `V` has no type specified.
-    V,
-    # pyre-ignore[2]: Parameter `seq_index` has no type specified.
-    seq_index,  #
-    # pyre-ignore[2]: Parameter `DO` has no type specified.
-    DO,  #
-    # pyre-ignore[2]: Parameter `Out_offsets` has no type specified.
-    Out_offsets,
-    # pyre-ignore[2]: Parameter `DQ` has no type specified.
-    DQ,
-    # pyre-ignore[2]: Parameter `DK` has no type specified.
-    DK,
-    # pyre-ignore[2]: Parameter `DV` has no type specified.
-    DV,  # shared by Q/K/V/DO.
-    # pyre-ignore[2]: Parameter `stride_qm` has no type specified.
-    stride_qm,
-    # pyre-ignore[2]: Parameter `stride_km` has no type specified.
-    stride_km,
-    # pyre-ignore[2]: Parameter `stride_qh` has no type specified.
-    stride_qh,
-    # pyre-ignore[2]: Parameter `stride_kh` has no type specified.
-    stride_kh,
-    # pyre-ignore[2]: Parameter `stride_d` has no type specified.
-    stride_d,
-    # pyre-ignore[2]: Parameter `stride_dom` has no type specified.
-    stride_dom,
-    # pyre-ignore[2]: Parameter `stride_doh` has no type specified.
-    stride_doh,
-    # pyre-ignore[2]: Parameter `Z` has no type specified.
-    Z,
-    # pyre-ignore[2]: Parameter `H` has no type specified.
-    H,
-    # pyre-ignore[2]: Parameter `G` has no type specified.
-    G,
-    # pyre-ignore[2]: Parameter `N_CTX` has no type specified.
-    N_CTX,  #
-    # pyre-ignore[2]: Parameter `N_CTX_KV` has no type specified.
-    N_CTX_KV,  #
-    # pyre-ignore[2]: Parameter `qk_scale` has no type specified.
-    qk_scale,  #
-    # pyre-ignore[2]: Parameter `dts_encoding` has no type specified.
-    dts_encoding,
-    # pyre-ignore[2]: Parameter `dts_event_request_even` has no type specified.
-    dts_event_request_even,
-    # pyre-ignore[2]: Parameter `dts_event_request_log` has no type specified.
-    dts_event_request_log,
-    # pyre-ignore[2]: Parameter `dts_adjacent_event_log` has no type specified.
-    dts_adjacent_event_log,
-    # pyre-ignore[2]: Parameter `dpos_emb` has no type specified.
-    dpos_emb,
-    # pyre-ignore[2]: Parameter `ts_encoding_params` has no type specified.
-    ts_encoding_params,
-    # pyre-ignore[2]: Parameter `ts_event_request_even_params` has no type specified.
-    ts_event_request_even_params,
-    # pyre-ignore[2]: Parameter `ts_event_request_log_params` has no type specified.
-    ts_event_request_log_params,
-    # pyre-ignore[2]: Parameter `ts_adjacent_event_log_params` has no type specified.
-    ts_adjacent_event_log_params,
-    # pyre-ignore[2]: Parameter `ts_encoding_bucket_values` has no type specified.
-    ts_encoding_bucket_values,
-    # pyre-ignore[2]: Parameter `ts_event_request_even_bucket_values` has no type specified.
-    ts_event_request_even_bucket_values,
-    # pyre-ignore[2]: Parameter `ts_event_request_log_bucket_values` has no type specified.
-    ts_event_request_log_bucket_values,
-    # pyre-ignore[2]: Parameter `ts_adjacent_event_log_bucket_values` has no type specified.
-    ts_adjacent_event_log_bucket_values,
-    # pyre-ignore[2]: Parameter `pos_emb_params` has no type specified.
-    pos_emb_params,
-    # pyre-ignore[2]: Parameter `pos_emb_bucket_values` has no type specified.
-    pos_emb_bucket_values,
+    Q: object,
+    Q_offsets: object,
+    K: object,
+    K_offsets: object,
+    V: object,
+    seq_index: object,  #
+    DO: object,  #
+    Out_offsets: object,
+    DQ: object,
+    DK: object,
+    DV: object,  # shared by Q/K/V/DO.
+    stride_qm: object,
+    stride_km: object,
+    stride_qh: object,
+    stride_kh: object,
+    stride_d: object,
+    stride_dom: object,
+    stride_doh: object,
+    Z: object,
+    H: object,
+    G: object,
+    N_CTX: object,  #
+    N_CTX_KV: object,  #
+    qk_scale: object,  #
+    dts_encoding: object,
+    dts_event_request_even: object,
+    dts_event_request_log: object,
+    dts_adjacent_event_log: object,
+    dpos_emb: object,
+    ts_encoding_params: object,
+    ts_event_request_even_params: object,
+    ts_event_request_log_params: object,
+    ts_adjacent_event_log_params: object,
+    ts_encoding_bucket_values: object,
+    ts_event_request_even_bucket_values: object,
+    ts_event_request_log_bucket_values: object,
+    ts_adjacent_event_log_bucket_values: object,
+    pos_emb_params: object,
+    pos_emb_bucket_values: object,
     FUSED_QKV: tl.constexpr,  #
     FUSED_KV: tl.constexpr,  #
     SORT_BY_SEQ_LENGTH: tl.constexpr,  #
