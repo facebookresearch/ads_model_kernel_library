@@ -75,7 +75,7 @@ def hash_callable(func: Callable) -> str:
     return hasher.hexdigest()
 
 
-def create_softcap_scoremod(softcap_val):
+def create_softcap_scoremod(softcap_val: float) -> Callable:
     """Create a score modification function for attention logit soft-capping.
 
     Returns a JIT-compiled function that applies x * tanh(x / softcap) to
