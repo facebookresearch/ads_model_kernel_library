@@ -834,7 +834,7 @@ class FlashAttentionBackwardSm100:
         softmax_scale: cutlass.Float32,
         softmax_scale_log2: cutlass.Float32,
         tile_sched_params: ParamsBase,
-    ):
+    ) -> None:
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
         # Prefetch tma descriptor

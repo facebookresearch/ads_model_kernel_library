@@ -96,7 +96,7 @@ class FlashAttentionForwardCombine:
             return False
         return True
 
-    def _setup_attributes(self):
+    def _setup_attributes(self) -> None:
         # GMEM copy setup for O partial
         universal_copy_bits = 128
         async_copy_elems = universal_copy_bits // self.dtype_partial.width
