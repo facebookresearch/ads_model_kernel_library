@@ -2997,7 +2997,10 @@ def _get_extra_kernel_args(HEAD_DIM_K: int) -> dict[str, Any]:
         waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
         extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
     elif is_mtia():
-        extra_kern_args = {"dma_in_on_core_a": True, "enable_dot_boundary_prop": True}
+        extra_kern_args = {
+            "dual_core_strategy": "dma-in-on-core-a",
+            "enable_dot_boundary_prop": True,
+        }
     return extra_kern_args
 
 
