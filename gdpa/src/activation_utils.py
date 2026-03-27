@@ -19,7 +19,7 @@ import cutlass  # pyre-ignore[21]
 import cutlass.cute as cute  # pyre-ignore[21]
 from ads_mkl.ops.cute_dsl.gdpa.src.utils import mul_packed_f32x2, sub_packed_f32x2
 from cutlass import Float32, Int64, Uint32, Uint8  # pyre-ignore[21]
-from cutlass._mlir.dialects import llvm, nvvm, vector  # pyre-ignore[21]
+from cutlass._mlir.dialects import llvm, vector  # pyre-ignore[21]
 from cutlass.cutlass_dsl import dsl_user_op, T  # pyre-ignore[21]
 
 # MXFP8 block scaling constants
