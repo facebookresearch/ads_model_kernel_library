@@ -134,13 +134,6 @@ from .hardware import (
 VAR_ARGS_ARRAY = List[Any]
 
 
-def is_hip() -> bool:
-    try:
-        return triton.runtime.driver.active.get_current_target().backend == "hip"
-    except RuntimeError:
-        return False
-
-
 def create_dummy_tensor(x: torch.Tensor) -> torch.Tensor:
     return torch.ones(1, device=x.device, dtype=torch.int32)
 
@@ -2993,7 +2986,7 @@ def _compute_kernel_strides(
 def _get_extra_kernel_args(HEAD_DIM_K: int) -> dict[str, Any]:
     extra_kern_args = {}
     # Tuning for AMD target
-    if is_hip():
+    if is_amd():
         waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
         extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
     elif is_mtia():

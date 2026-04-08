@@ -31,7 +31,6 @@ from ..triton_generalized_dot_product_attention import (
     create_dummy_tensor,
     expect_contiguous,
     generalized_dot_product_attention,
-    is_hip,
     next_power_of_2,
 )
 
@@ -108,56 +107,6 @@ class UtilityFunctionsTestCase(unittest.TestCase):
         self.assertEqual(result.device, input_tensor.device)
         self.assertEqual(result.shape, (1,))
         self.assertEqual(result.item(), 1)
-
-    @patch(
-        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.triton"
-    )
-    def test_is_hip_returns_true_when_backend_is_hip(self, mock_triton: Mock) -> None:
-        """Test is_hip returns True when triton backend is HIP."""
-        # Arrange
-        mock_target = Mock()
-        mock_target.backend = "hip"
-        mock_triton.runtime.driver.active.get_current_target.return_value = mock_target
-
-        # Act
-        result = is_hip()
-
-        # Assert
-        self.assertTrue(result)
-
-    @patch(
-        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.triton"
-    )
-    def test_is_hip_returns_false_when_backend_is_not_hip(
-        self, mock_triton: Mock
-    ) -> None:
-        """Test is_hip returns False when triton backend is not HIP."""
-        # Arrange
-        mock_target = Mock()
-        mock_target.backend = "cuda"
-        mock_triton.runtime.driver.active.get_current_target.return_value = mock_target
-
-        # Act
-        result = is_hip()
-
-        # Assert
-        self.assertFalse(result)
-
-    @patch(
-        "ads_mkl.ops.cute_dsl.gdpa.triton.triton_generalized_dot_product_attention.triton"
-    )
-    def test_is_hip_handles_runtime_error(self, mock_triton: Mock) -> None:
-        """Test is_hip returns False when RuntimeError is raised."""
-        # Arrange
-        mock_triton.runtime.driver.active.get_current_target.side_effect = RuntimeError(
-            "No GPU"
-        )
-
-        # Act
-        result = is_hip()
-
-        # Assert
-        self.assertFalse(result)
 
 
 class CPUGeneralizedDotProductAttentionTestCase(unittest.TestCase):
