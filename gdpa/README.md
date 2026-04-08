@@ -4,11 +4,12 @@ This repo provides the kernel implementation of Generalized Dot Product Attentio
 
 **[Paper] Kunlun: Establishing Scaling Laws for Massive-Scale Recommendation Systems through Unified Architecture Design**
 Xiaoyi Liu, Jiaqi Xu, etc, Meta Ads AI, 2026
-Paper: https://arxiv.org/abs/2602.10016
+Paper: [arxiv.org/abs/2602.10016](https://arxiv.org/pdf/2602.10016)
 
 **[Blog] Generalized Dot Product Attention: Tackling Real-World Challenges in GPU Training Kernels**
 Jiaqi Xu, Chao Chen, Shuqi Yang, Markus Hoehnerbach, Xiaoyi Liu, Jacky Zhou, Dev Shankar, Tri Dao, etc, Meta Ads AI, Meta Codesign, Princeton University, 2026
-Will be published soon.
+Blog: [pytorch.org/blog](https://pytorch.org/blog/generalized-dot-product-attention-tackling-real-world-challenges-in-gpu-training-kernels/)
+Join the conversation on social media: [LinkedIn](https://www.linkedin.com/feed/update/urn:li:activity:7440075680962285568) | [Facebook](https://www.facebook.com/pytorch/posts/pfbid037Kofbm6p9Qrv4qaqRNYpSVbiuB82ajTiej1L4T2agm4diPoybEi6nbmQFmNNxNLTl) | [X](https://x.com/PyTorch/status/2034311193444094207) | [Bluesky](https://bsky.app/profile/pytorch.org/post/3mhdwxrsw6j2f)
 
 ## Benchmark Results
 
