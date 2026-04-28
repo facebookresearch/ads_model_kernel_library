@@ -1215,6 +1215,241 @@ def _gdpa_fwd_persistent(
         tile_idx += num_progs
 
 
+@triton.jit  # pragma: no cover
+# pyre-ignore[3]: Return type is not specified.
+def _apply_all_encodings_bwd(
+    # pyre-ignore[2]: Parameter `qT` has no type specified.
+    qT,
+    # pyre-ignore[2]: Parameter `ts_encoding_bucket_values` has no type specified.
+    ts_encoding_bucket_values,
+    # pyre-ignore[2]: Parameter `ts_encoding_params` has no type specified.
+    ts_encoding_params,
+    # pyre-ignore[2]: Parameter `ts_event_request_even_bucket_values` has no type specified.
+    ts_event_request_even_bucket_values,
+    # pyre-ignore[2]: Parameter `ts_event_request_even_params` has no type specified.
+    ts_event_request_even_params,
+    # pyre-ignore[2]: Parameter `ts_event_request_log_bucket_values` has no type specified.
+    ts_event_request_log_bucket_values,
+    # pyre-ignore[2]: Parameter `ts_event_request_log_params` has no type specified.
+    ts_event_request_log_params,
+    # pyre-ignore[2]: Parameter `ts_adjacent_event_log_bucket_values` has no type specified.
+    ts_adjacent_event_log_bucket_values,
+    # pyre-ignore[2]: Parameter `ts_adjacent_event_log_params` has no type specified.
+    ts_adjacent_event_log_params,
+    # pyre-ignore[2]: Parameter `pos_emb_bucket_values` has no type specified.
+    pos_emb_bucket_values,
+    # pyre-ignore[2]: Parameter `pos_emb_params` has no type specified.
+    pos_emb_params,
+    # pyre-ignore[2]: Parameter `begin_q` has no type specified.
+    begin_q,
+    # pyre-ignore[2]: Parameter `offs_m` has no type specified.
+    offs_m,
+    # pyre-ignore[2]: Parameter `stride_qm` has no type specified.
+    stride_qm,
+    # pyre-ignore[2]: Parameter `offs_k` has no type specified.
+    offs_k,
+    # pyre-ignore[2]: Parameter `qlen` has no type specified.
+    qlen,
+):
+    if ts_encoding_bucket_values is not None:
+        ts_encoding_bucket_values_ptr = ts_encoding_bucket_values + begin_q + offs_m
+        ts_bucket_vals = tl.load(
+            ts_encoding_bucket_values_ptr,
+            mask=(offs_m < qlen),
+            other=0.0,
+        )
+        ts_encoding_params_block_ptr = (
+            ts_encoding_params + ts_bucket_vals[None, :] * stride_qm + offs_k[:, None]
+        )
+        ts_encoding_val = tl.load(
+            ts_encoding_params_block_ptr,
+            mask=(offs_m[None, :] < qlen),
+            other=0.0,
+        )
+        qT = qT + ts_encoding_val
+    if ts_event_request_even_bucket_values is not None:
+        ts_event_request_even_bucket_values_ptr = (
+            ts_event_request_even_bucket_values + begin_q + offs_m
+        )
+        ts_bucket_vals = tl.load(
+            ts_event_request_even_bucket_values_ptr,
+            mask=(offs_m < qlen),
+            other=0.0,
+        )
+        ts_event_request_even_params_block_ptr = (
+            ts_event_request_even_params
+            + ts_bucket_vals[None, :] * stride_qm
+            + offs_k[:, None]
+        )
+        ts_event_request_even_val = tl.load(
+            ts_event_request_even_params_block_ptr,
+            mask=(offs_m[None, :] < qlen),
+            other=0.0,
+        )
+        qT = qT + ts_event_request_even_val
+    if ts_event_request_log_bucket_values is not None:
+        ts_event_request_log_bucket_values_ptr = (
+            ts_event_request_log_bucket_values + begin_q + offs_m
+        )
+        ts_bucket_vals = tl.load(
+            ts_event_request_log_bucket_values_ptr,
+            mask=(offs_m < qlen),
+            other=0.0,
+        )
+        ts_event_request_log_params_block_ptr = (
+            ts_event_request_log_params
+            + ts_bucket_vals[None, :] * stride_qm
+            + offs_k[:, None]
+        )
+        ts_event_request_log_val = tl.load(
+            ts_event_request_log_params_block_ptr,
+            mask=(offs_m[None, :] < qlen),
+            other=0.0,
+        )
+        qT = qT + ts_event_request_log_val
+    if ts_adjacent_event_log_bucket_values is not None:
+        ts_adjacent_event_log_bucket_values_ptr = (
+            ts_adjacent_event_log_bucket_values + begin_q + offs_m
+        )
+        ts_bucket_vals = tl.load(
+            ts_adjacent_event_log_bucket_values_ptr,
+            mask=(offs_m < qlen),
+            other=0.0,
+        )
+        ts_adjacent_event_log_params_block_ptr = (
+            ts_adjacent_event_log_params
+            + ts_bucket_vals[None, :] * stride_qm
+            + offs_k[:, None]
+        )
+        ts_adjacent_event_log_val = tl.load(
+            ts_adjacent_event_log_params_block_ptr,
+            mask=(offs_m[None, :] < qlen),
+            other=0.0,
+        )
+        qT = qT + ts_adjacent_event_log_val
+    if pos_emb_bucket_values is not None:
+        pos_emb_bucket_values_ptr = pos_emb_bucket_values + begin_q + offs_m
+        pos_emb_bucket_vals = tl.load(
+            pos_emb_bucket_values_ptr,
+            mask=(offs_m < qlen),
+            other=0.0,
+        )
+        pos_emb_params_block_ptr = (
+            pos_emb_params + pos_emb_bucket_vals[None, :] * stride_qm + offs_k[:, None]
+        )
+        pos_emb_val = tl.load(
+            pos_emb_params_block_ptr,
+            mask=(offs_m[None, :] < qlen),
+            other=0.0,
+        )
+        qT = qT + pos_emb_val
+    return qT
+
+
+@triton.jit  # pragma: no cover
+# pyre-ignore[3]: Return type is not specified.
+def _apply_masking_bwd(
+    # pyre-ignore[2]: Parameter `pT` has no type specified.
+    pT,
+    # pyre-ignore[2]: Parameter `offs_m` has no type specified.
+    offs_m,
+    # pyre-ignore[2]: Parameter `offs_n` has no type specified.
+    offs_n,
+    MASK: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+):
+    if MASK:
+        mask = offs_m[None, :] >= offs_n[:, None]
+        pT = tl.where(mask, pT, 0.0)
+    if WINDOW_SIZE is not None:
+        window_mask = tl.abs(offs_m[None, :] - offs_n[:, None]) <= WINDOW_SIZE
+        pT = tl.where(window_mask, pT, 0.0)
+    return pT
+
+
+@triton.jit  # pragma: no cover
+# pyre-ignore[3]: Return type is not specified.
+def _gelu_variant_fwd_and_grad_dkdv(
+    # pyre-ignore[2]: Parameter `pT` has no type specified.
+    pT,
+    # pyre-ignore[2]: Parameter `Q` has no type specified.
+    Q,
+    # pyre-ignore[2]: Parameter `activation_enum_int` has no type specified.
+    activation_enum_int,
+):
+    if activation_enum_int == 2:
+        tanh_out = tanh(0.7978845608 * pT * (1 + 0.044715 * pT * pT))
+        ppT = 0.5 * pT * (1 + tanh_out)
+    elif activation_enum_int == 3:
+        ppT, tanh_out = fast_gelu_joint(pT)
+    else:
+        pT_bf16 = pT.to(Q.dtype.element_ty)
+        tanh_out = tanh_approx_bf16(
+            0.7978845608 * pT_bf16 * (1 + 0.044715 * pT * pT)
+        ).to(tl.float32)
+        # pyre-ignore[16]: `float` has no attribute `to`
+        ppT = (0.5 * pT_bf16 * (1 + tanh_out)).to(tl.float32)
+    if activation_enum_int == 6:
+        pT_grad = 0.5 * pT * (1 - tanh_out * tanh_out) * (
+            0.7978845608 + 0.1070322243 * pT * pT
+        ) + 0.5 * (1 + tanh_out)
+    else:
+        pT_grad = (
+            0.5
+            * pT
+            * (1 - tanh_out * tanh_out)
+            * (0.7978845608 + 0.1070322243 * pT * pT)
+        ) + 0.5 * (1 + tanh_out)
+    return ppT, pT_grad
+
+
+@triton.jit  # pragma: no cover
+# pyre-ignore[3]: Return type is not specified.
+def _standard_activation_fwd_and_grad_dkdv(
+    # pyre-ignore[2]: Parameter `pT` has no type specified.
+    pT,
+    # pyre-ignore[2]: Parameter `activation_enum_int` has no type specified.
+    activation_enum_int,
+):
+    if activation_enum_int == 0:
+        ppT = raw(pT)
+    elif activation_enum_int == 1:
+        ppT = gelu(pT)
+    elif activation_enum_int == 4:
+        ppT = leaky_relu(pT)
+    elif activation_enum_int == 5:
+        ppT = relu(pT)
+    elif activation_enum_int == 7:
+        ppT = silu(pT)
+    elif activation_enum_int == 8:
+        ppT = fast_silu(pT)
+    elif activation_enum_int == 9:
+        ppT = hardswish(pT)
+    elif activation_enum_int == 10:
+        ppT = relu_square(pT)
+    else:
+        ppT = pT
+    if activation_enum_int == 0:
+        pT_grad = raw_grad(pT)
+    elif activation_enum_int == 1:
+        pT_grad = gelu_grad(pT)
+    elif activation_enum_int == 4:
+        pT_grad = leaky_relu_grad(pT)
+    elif activation_enum_int == 5:
+        pT_grad = relu_grad(pT)
+    elif activation_enum_int == 7:
+        pT_grad = silu_grad(pT)
+    elif activation_enum_int == 8:
+        pT_grad = fast_silu_grad(pT)
+    elif activation_enum_int == 9:
+        pT_grad = hardswish_grad(pT)
+    elif activation_enum_int == 10:
+        pT_grad = relu_square_grad(pT)
+    else:
+        pT_grad = raw_grad(pT)
+    return ppT, pT_grad
+
+
 # The main inner-loop logic for computing dK and dV.
 @triton.jit  # pragma: no cover
 # pyre-ignore[3]: Return type is not specified.
@@ -1308,32 +1543,10 @@ def _gdpa_bwd_dkdv(
     qT_ptrs = None
     do_ptrs = None
     dq_ptrs = None
-    ts_encoding_bucket_values_ptr = None
-    ts_event_request_even_bucket_values_ptr = None
-    ts_event_request_log_bucket_values_ptr = None
-    ts_adjacent_event_log_bucket_values_ptr = None
-    pos_emb_bucket_values_ptr = None
 
     if not enable_tma:
         qT_ptrs = Q + offs_m[None, :] * stride_qm + offs_k[:, None] * stride_d
         do_ptrs = DO + offs_m[:, None] * stride_dom + offs_k[None, :] * stride_d
-
-    if ts_encoding_bucket_values is not None:
-        ts_encoding_bucket_values_ptr = ts_encoding_bucket_values + begin_q + offs_m
-    if ts_event_request_even_bucket_values is not None:
-        ts_event_request_even_bucket_values_ptr = (
-            ts_event_request_even_bucket_values + begin_q + offs_m
-        )
-    if ts_event_request_log_bucket_values is not None:
-        ts_event_request_log_bucket_values_ptr = (
-            ts_event_request_log_bucket_values + begin_q + offs_m
-        )
-    if ts_adjacent_event_log_bucket_values is not None:
-        ts_adjacent_event_log_bucket_values_ptr = (
-            ts_adjacent_event_log_bucket_values + begin_q + offs_m
-        )
-    if pos_emb_bucket_values is not None:
-        pos_emb_bucket_values_ptr = pos_emb_bucket_values + begin_q + offs_m
 
     if USE_DQ_ATOMIC_ADD:
         dq_ptrs = DQ + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_d
@@ -1345,7 +1558,6 @@ def _gdpa_bwd_dkdv(
         offs_m = curr_m + tl.arange(0, BLOCK_M1)
         qmask = (offs_k[:, None] < HEAD_DIM) & (offs_m[None, :] < qlen)
         if enable_tma:
-            # qmask = (offs_k[:, None] < HEAD_DIM) & (offs_m[None, :] < qlen)
             q = desc_q.load(
                 [
                     (begin_q + curr_m).to(tl.int32),
@@ -1353,96 +1565,27 @@ def _gdpa_bwd_dkdv(
                 ],
             )
             qT = tl.trans(q)
-            # we may need this line for correctness
-            # qT = tl.where(qmask, qT, 0.0)
         else:
             qT = tl.load(qT_ptrs, mask=qmask)
 
-        if ts_encoding_bucket_values is not None:
-            ts_bucket_vals = tl.load(
-                ts_encoding_bucket_values_ptr,
-                mask=(offs_m < qlen),
-                other=0.0,
-            )
-            ts_encoding_params_block_ptr = (
-                ts_encoding_params
-                + ts_bucket_vals[None, :] * stride_qm
-                + offs_k[:, None]
-            )
-            ts_encoding_val = tl.load(
-                ts_encoding_params_block_ptr,
-                mask=(offs_m[None, :] < qlen),
-                other=0.0,
-            )
-            qT = qT + ts_encoding_val
-        if ts_event_request_even_bucket_values is not None:
-            ts_bucket_vals = tl.load(
-                ts_event_request_even_bucket_values_ptr,
-                mask=(offs_m < qlen),
-                other=0.0,
-            )
-            ts_event_request_even_params_block_ptr = (
-                ts_event_request_even_params
-                + ts_bucket_vals[None, :] * stride_qm
-                + offs_k[:, None]
-            )
-            ts_event_request_even_val = tl.load(
-                ts_event_request_even_params_block_ptr,
-                mask=(offs_m[None, :] < qlen),
-                other=0.0,
-            )
-            qT = qT + ts_event_request_even_val
-        if ts_event_request_log_bucket_values is not None:
-            ts_bucket_vals = tl.load(
-                ts_event_request_log_bucket_values_ptr,
-                mask=(offs_m < qlen),
-                other=0.0,
-            )
-            ts_event_request_log_params_block_ptr = (
-                ts_event_request_log_params
-                + ts_bucket_vals[None, :] * stride_qm
-                + offs_k[:, None]
-            )
-            ts_event_request_log_val = tl.load(
-                ts_event_request_log_params_block_ptr,
-                mask=(offs_m[None, :] < qlen),
-                other=0.0,
-            )
-            qT = qT + ts_event_request_log_val
-        if ts_adjacent_event_log_bucket_values is not None:
-            ts_bucket_vals = tl.load(
-                ts_adjacent_event_log_bucket_values_ptr,
-                mask=(offs_m < qlen),
-                other=0.0,
-            )
-            ts_adjacent_event_log_params_block_ptr = (
-                ts_adjacent_event_log_params
-                + ts_bucket_vals[None, :] * stride_qm
-                + offs_k[:, None]
-            )
-            ts_adjacent_event_log_val = tl.load(
-                ts_adjacent_event_log_params_block_ptr,
-                mask=(offs_m[None, :] < qlen),
-                other=0.0,
-            )
-            qT = qT + ts_adjacent_event_log_val
-        if pos_emb_bucket_values is not None:
-            pos_emb_bucket_vals = tl.load(
-                pos_emb_bucket_values_ptr,
-                mask=(offs_m < qlen),
-                other=0.0,
-            )
-            pos_emb_params_block_ptr = (
-                pos_emb_params
-                + pos_emb_bucket_vals[None, :] * stride_qm
-                + offs_k[:, None]
-            )
-            pos_emb_val = tl.load(
-                pos_emb_params_block_ptr,
-                mask=(offs_m[None, :] < qlen),
-                other=0.0,
-            )
-            qT = qT + pos_emb_val
+        qT = _apply_all_encodings_bwd(
+            qT,
+            ts_encoding_bucket_values,
+            ts_encoding_params,
+            ts_event_request_even_bucket_values,
+            ts_event_request_even_params,
+            ts_event_request_log_bucket_values,
+            ts_event_request_log_params,
+            ts_adjacent_event_log_bucket_values,
+            ts_adjacent_event_log_params,
+            pos_emb_bucket_values,
+            pos_emb_params,
+            begin_q,
+            offs_m,
+            stride_qm,
+            offs_k,
+            qlen,
+        )
 
         qT = qT.to(k.dtype)
         qkT = tl.dot(k, qT)
@@ -1456,104 +1599,25 @@ def _gdpa_bwd_dkdv(
                     (off_h2 * stride_qh).to(tl.int32),
                 ],
             )
-            # do = tl.where(omask, do, 0.0)
         else:
-            do = tl.load(do_ptrs, mask=omask)  # Compute dP and dS.
+            do = tl.load(do_ptrs, mask=omask)
 
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
         pT = qkT
-        # Autoregressive masking.
-        if MASK:
-            mask = offs_m[None, :] >= offs_n[:, None]
-            pT = tl.where(mask, pT, 0.0)
-        # Sliding window masking.
-        if WINDOW_SIZE is not None:
-            window_mask = tl.abs(offs_m[None, :] - offs_n[:, None]) <= WINDOW_SIZE
-            pT = tl.where(window_mask, pT, 0.0)
+        pT = _apply_masking_bwd(pT, offs_m, offs_n, MASK, WINDOW_SIZE)
         # Compute dV.
         if ((activation_enum_int == 2) or (activation_enum_int == 3)) or (
             activation_enum_int == 6
         ):
-            if activation_enum_int == 2:
-                tanh_out = tanh(0.7978845608 * pT * (1 + 0.044715 * pT * pT))
-                ppT = 0.5 * pT * (1 + tanh_out)
-            elif activation_enum_int == 3:
-                ppT, tanh_out = fast_gelu_joint(pT)
-            else:
-                pT_bf16 = pT.to(Q.dtype.element_ty)
-                tanh_out = tanh_approx_bf16(
-                    0.7978845608 * pT_bf16 * (1 + 0.044715 * pT * pT)
-                ).to(tl.float32)
-                # pyre-ignore[16]: `float` has no attribute `to`
-                ppT = (0.5 * pT_bf16 * (1 + tanh_out)).to(tl.float32)
-            ppT *= qk_scale
-            ppT = ppT.to(Q.dtype.element_ty)
-            dv += tl.dot(ppT, do)
-
-            if activation_enum_int == 6:
-                pT = 0.5 * pT * (1 - tanh_out * tanh_out) * (
-                    0.7978845608 + 0.1070322243 * pT * pT
-                ) + 0.5 * (1 + tanh_out)
-            else:
-                pT = (
-                    0.5
-                    * pT
-                    * (1 - tanh_out * tanh_out)
-                    * (0.7978845608 + 0.1070322243 * pT * pT)
-                ) + 0.5 * (1 + tanh_out)
+            ppT, pT = _gelu_variant_fwd_and_grad_dkdv(pT, Q, activation_enum_int)
         else:
-            if activation_enum_int == 0:
-                ppT = raw(pT)
-            elif activation_enum_int == 1:
-                ppT = gelu(pT)
-            elif activation_enum_int == 4:
-                ppT = leaky_relu(pT)
-            elif activation_enum_int == 5:
-                ppT = relu(pT)
-            elif activation_enum_int == 7:
-                ppT = silu(pT)
-            elif activation_enum_int == 8:
-                ppT = fast_silu(pT)
-            elif activation_enum_int == 9:
-                ppT = hardswish(pT)
-            elif activation_enum_int == 10:
-                ppT = relu_square(pT)
-            else:
-                ppT = pT
-            ppT *= qk_scale
-            ppT = ppT.to(Q.dtype.element_ty)
-            dv += tl.dot(ppT, do)
-
-            ##
-            if activation_enum_int == 0:
-                pT = raw_grad(pT)
-            elif activation_enum_int == 1:
-                # activation = gelu TypeError("cannot convert JITFunction(gdpa.triton.math:gelu) of type <class 'triton.runtime.jit.JITFunction'> to tensor")
-                pT = gelu_grad(pT)
-            elif activation_enum_int == 4:
-                pT = leaky_relu_grad(pT)
-            elif activation_enum_int == 5:
-                pT = relu_grad(pT)
-            elif activation_enum_int == 7:
-                pT = silu_grad(pT)
-            elif activation_enum_int == 8:
-                pT = fast_silu_grad(pT)
-            elif activation_enum_int == 9:
-                pT = hardswish_grad(pT)
-            elif activation_enum_int == 10:
-                pT = relu_square_grad(pT)
-            else:
-                pT = raw_grad(pT)
+            ppT, pT = _standard_activation_fwd_and_grad_dkdv(pT, activation_enum_int)
+        ppT *= qk_scale
+        ppT = ppT.to(Q.dtype.element_ty)
+        dv += tl.dot(ppT, do)
         pT *= qk_scale
 
-        # Autoregressive masking.
-        if MASK:
-            mask = offs_m[None, :] >= offs_n[:, None]
-            pT = tl.where(mask, pT, 0.0)
-        # Sliding window masking.
-        if WINDOW_SIZE is not None:
-            window_mask = tl.abs(offs_m[None, :] - offs_n[:, None]) <= WINDOW_SIZE
-            pT = tl.where(window_mask, pT, 0.0)
+        pT = _apply_masking_bwd(pT, offs_m, offs_n, MASK, WINDOW_SIZE)
         dsT = pT * dpT
         dsT = dsT.to(Q.dtype.element_ty)
         dk += tl.dot(dsT, tl.trans(qT))
@@ -1579,21 +1643,6 @@ def _gdpa_bwd_dkdv(
         if not enable_tma:
             qT_ptrs += step_m * stride_qm
             do_ptrs += step_m * stride_dom
-
-        if ts_encoding_bucket_values is not None:
-            ts_encoding_bucket_values_ptr += step_m
-
-        if ts_event_request_even_bucket_values is not None:
-            ts_event_request_even_bucket_values_ptr += step_m
-
-        if ts_event_request_log_bucket_values is not None:
-            ts_event_request_log_bucket_values_ptr += step_m
-
-        if ts_adjacent_event_log_bucket_values is not None:
-            ts_adjacent_event_log_bucket_values_ptr += step_m
-
-        if pos_emb_bucket_values is not None:
-            pos_emb_bucket_values_ptr += step_m
 
         if USE_DQ_ATOMIC_ADD:
             dq_ptrs += step_m * stride_qm
