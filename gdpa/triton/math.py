@@ -122,12 +122,14 @@ def relu(x):
 def relu_grad(x):
     zero = 0.0
     one = 1.0
+    # pyrefly: ignore [missing-attribute]
     return tl.where(x >= 0, one.to(x.dtype), zero.to(x.dtype))
 
 
 @triton.jit  # pragma: no cover
 def relu_square(x):
     zero = 0.0
+    # pyrefly: ignore [missing-attribute]
     y = tl.where(x >= 0, x, zero.to(x.dtype))
     return y * y
 
@@ -136,12 +138,14 @@ def relu_square(x):
 def relu_square_grad(x):
     zero = 0.0
     two = 2.0
+    # pyrefly: ignore [missing-attribute]
     return tl.where(x >= 0, two.to(x.dtype) * x, zero.to(x.dtype))
 
 
 @triton.jit  # pragma: no cover
 def leaky_relu(x):
     scale = 0.01 + 0.0
+    # pyrefly: ignore [missing-attribute]
     scale = scale.to(x.dtype)
     return tl.where(x >= 0, x, scale * x)
 
@@ -151,7 +155,9 @@ def leaky_relu_grad(x):
     min_grad = 0.01
     max_grad = 1
 
+    # pyrefly: ignore [missing-attribute]
     min_grad = min_grad.to(x.dtype)
+    # pyrefly: ignore [missing-attribute]
     max_grad = max_grad.to(x.dtype)
 
     return tl.where(x >= 0, max_grad, min_grad)
@@ -161,11 +167,13 @@ if is_mtia():
 
     @triton.jit  # pragma: no cover
     def gelu(x):
+        # pyrefly: ignore [missing-attribute]
         return libdevice.gelu(x)
 else:
 
     @triton.jit  # pragma: no cover
     def gelu(x):
+        # pyrefly: ignore [missing-attribute]
         return x * 0.5 * (1.0 + libdevice.erf(x * 0.7071067811865476))
 
 
@@ -173,11 +181,13 @@ if is_mtia():
 
     @triton.jit  # pragma: no cover
     def gelu_grad(x):
+        # pyrefly: ignore [missing-attribute]
         return libdevice.dgelu(x)
 else:
 
     @triton.jit  # pragma: no cover
     def gelu_grad(x):
+        # pyrefly: ignore [missing-attribute]
         cdf = 0.5 * (1.0 + libdevice.erf(x * 0.7071067811865476))
         pdf = tl.exp(-0.5 * x * x) * 0.3989422804014327
         return cdf + x * pdf
@@ -284,6 +294,7 @@ if is_mtia():
 
     @triton.jit  # pragma: no cover
     def fast_gelu_grad(x: tl.tensor) -> tl.tensor:
+        # pyrefly: ignore [missing-attribute]
         return libdevice.dgelu(x)
 
     @triton.jit
@@ -373,7 +384,9 @@ def hardswish(x):
     six = 6.0
     three = 3.0
     inv_six = 1.0 / 6.0
+    # pyrefly: ignore [missing-attribute]
     t = tl.minimum(tl.maximum(x + three.to(x.dtype), zero.to(x.dtype)), six.to(x.dtype))
+    # pyrefly: ignore [missing-attribute]
     return x * t * inv_six.to(x.dtype)
 
 
@@ -384,9 +397,17 @@ def hardswish_grad(x):
     three = 3.0
     half = 0.5
     third = 1.0 / 3.0
+    # pyrefly: ignore [missing-attribute]
     cond_neg = x <= (-three.to(x.dtype))
+    # pyrefly: ignore [missing-attribute]
     cond_pos = x >= three.to(x.dtype)
+    # pyrefly: ignore [missing-attribute]
     mid = third.to(x.dtype) * x + half.to(x.dtype)
     return tl.where(
-        cond_pos, one.to(x.dtype), tl.where(cond_neg, zero.to(x.dtype), mid)
+        # pyrefly: ignore [missing-attribute]
+        cond_pos,
+        # pyrefly: ignore [missing-attribute]
+        one.to(x.dtype),
+        # pyrefly: ignore [missing-attribute]
+        tl.where(cond_neg, zero.to(x.dtype), mid),
     )

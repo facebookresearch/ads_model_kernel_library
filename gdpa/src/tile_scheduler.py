@@ -25,9 +25,15 @@ from dataclasses import dataclass, fields
 from typing import Optional, Tuple
 
 import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
+
+# pyrefly: ignore [missing-import]
 import cutlass
+
+# pyrefly: ignore [missing-import]
 import cutlass.cute as cute
 from ads_mkl.ops.cute_dsl.gdpa.src.fast_math import clz, FastDivmod
+
+# pyrefly: ignore [missing-import]
 from cutlass import Int32
 
 
@@ -482,6 +488,7 @@ class SingleTileVarlenScheduler:
         if cutlass.const_expr(params.mSeqUsedQ is not None):
             seqlen = Int32(0)
             if batch_idx < params.num_batch:
+                # pyrefly: ignore [unsupported-operation]
                 seqlen = params.mSeqUsedQ[batch_idx]
         else:
             assert params.mCuSeqlensQ is not None
@@ -743,9 +750,12 @@ class SingleTileVarlenSchedulerSimple:
         if cutlass.const_expr(m_seq_used is not None):
             seqlen = Int32(0)
             if batch_idx < params.num_batch:
+                # pyrefly: ignore [unsupported-operation]
                 seqlen = m_seq_used[batch_idx]
         else:
+            # pyrefly: ignore [unsupported-operation]
             cur_cu_seqlen = m_cu_seqlen[batch_idx]
+            # pyrefly: ignore [unsupported-operation]
             next_cu_seqlen = m_cu_seqlen[batch_idx + 1]
             seqlen = next_cu_seqlen - cur_cu_seqlen
         is_valid = (

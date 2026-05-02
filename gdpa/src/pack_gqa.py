@@ -23,7 +23,11 @@ single tile so that KV data is loaded only once per group, reducing memory bandw
 # pyre-ignore-all-errors
 
 import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
+
+# pyrefly: ignore [missing-import]
 import cutlass
+
+# pyrefly: ignore [missing-import]
 import cutlass.cute as cute
 
 

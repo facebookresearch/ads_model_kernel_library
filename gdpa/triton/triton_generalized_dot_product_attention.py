@@ -87,6 +87,7 @@ from .math import (
 from .register_helpers import custom_register_kernel, custom_triton_op
 
 try:
+    # pyrefly: ignore [missing-import]
     from ads_mkl.ops.triton.mtia.triton_generalized_dot_product_attention import (
         gdpa_bwd as gdpa_bwd_mtia,
         gdpa_fwd as gdpa_fwd_mtia,
@@ -333,9 +334,13 @@ configs = [
         num_stages=s,
         num_warps=w,
     )
+    # pyrefly: ignore [not-iterable]
     for BM in block_m_hw_supported([32, 64, 128])  # [32, 64, 128, 256]
+    # pyrefly: ignore [not-iterable]
     for BN in block_n_hw_supported([32, 64, 128])  # 32, 64, 128]
+    # pyrefly: ignore [not-iterable]
     for s in stages_hw_supported([1, 3])  # [3, 4, 7]
+    # pyrefly: ignore [not-iterable]
     for w in warps_hw_supported([4, 8])  # [4, 8]
 ]
 
@@ -357,9 +362,13 @@ configsWS = [
             num_consumer_groups=2,
         )
     )
+    # pyrefly: ignore [not-iterable]
     for BM in block_m_hw_supported([128])
+    # pyrefly: ignore [not-iterable]
     for BN in block_n_hw_supported([64, 128])  # 32 will cause ws hang
+    # pyrefly: ignore [not-iterable]
     for s in stages_hw_supported([0])
+    # pyrefly: ignore [not-iterable]
     for w in warps_hw_supported([4])
 ]
 
@@ -468,6 +477,7 @@ def get_autotune_fwd_kernel(
     )
     return get_autotune_kernel(
         kernel,
+        # pyrefly: ignore [bad-argument-type]
         config_map.get(AUTOTUNE_CONFIG_SET, config_map.get("default")),
         key=["N_CTX", "HEAD_DIM", "H", "G", "FUSED_QKV", "FUSED_KV"],
     )
@@ -634,6 +644,7 @@ def _gdpa_fwd_compute(
             )
             # pyre-ignore[9]
             v_order: tl.constexpr = (
+                # pyrefly: ignore [bad-assignment]
                 (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
             )
             V_block_ptr = tl.make_block_ptr(
@@ -1813,9 +1824,13 @@ bwd_configs = [
         num_stages=s,
         num_warps=w,
     )
+    # pyrefly: ignore [not-iterable]
     for BM1 in block_m_hw_supported([32, 64])
+    # pyrefly: ignore [not-iterable]
     for BN1 in block_n_hw_supported([32, 64, 128])
+    # pyrefly: ignore [not-iterable]
     for s in stages_hw_supported([1, 3])
+    # pyrefly: ignore [not-iterable]
     for w in warps_hw_supported([4, 8])
 ]
 # pyre-ignore[5]: Globally accessible variable `bwd_configs_ws`
@@ -1836,9 +1851,13 @@ bwd_configs_ws = [
         )
     )
     for buf in [2]
+    # pyrefly: ignore [not-iterable]
     for BM1 in block_m_hw_supported([64])
+    # pyrefly: ignore [not-iterable]
     for BN1 in block_n_hw_supported([128])
+    # pyrefly: ignore [not-iterable]
     for s in stages_hw_supported([0])
+    # pyrefly: ignore [not-iterable]
     for w in warps_hw_supported([4])
 ]
 
@@ -1976,6 +1995,7 @@ def get_autotune_bwd_kernel(
     return get_autotune_kernel(
         kernel,
         list(
+            # pyrefly: ignore [no-matching-overload]
             filter(
                 bwd_keep, config_map.get(AUTOTUNE_CONFIG_SET, config_map.get("default"))
             )
@@ -2367,6 +2387,7 @@ def _gdpa_bwd_compute(
             tl.atomic_add(dk_ptrs, dk, mask=kmask, sem="relaxed")
         else:
             if enable_tma:
+                # pyrefly: ignore [missing-attribute]
                 desc_dk.store(
                     [
                         (begin_k + start_n).to(tl.int32),
@@ -2457,6 +2478,7 @@ def _gdpa_bwd_compute(
                         (off_h2 * stride_qh).to(tl.int32),
                     ],
                 )
+                # pyrefly: ignore [missing-attribute]
                 do = desc_do2.load(
                     [
                         (begin_q + start_m).to(tl.int32),
@@ -3029,6 +3051,7 @@ def _compute_kernel_strides(
     else:
         kstrides = key.stride()
         vstrides = value.stride()
+    # pyrefly: ignore [bad-return]
     return kstrides, vstrides
 
 
@@ -3367,6 +3390,7 @@ def _generalized_dot_product_attention_setup_context(
     elif fused_kv:
         HEAD_DIM_K = key.shape[-1] // 2
     else:
+        # pyrefly: ignore [missing-attribute]
         HEAD_DIM_K = key.shape[-1]
     BLOCK_D = max(next_power_of_2(HEAD_DIM_K), 32)
 
@@ -3748,6 +3772,7 @@ def generalized_dot_product_attention_backward(
     ):
         # pyre-ignore[16]: `Optional` has no attribute `to`
         dk = dk.to(orig_dtype)
+        # pyrefly: ignore [missing-attribute]
         dv = dv.to(orig_dtype)
 
     # pyre-ignore[7]

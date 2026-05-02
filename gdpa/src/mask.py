@@ -26,8 +26,14 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import ads_mkl.ops.cute_dsl.gdpa.src.utils as utils
+
+# pyrefly: ignore [missing-import]
 import cutlass
+
+# pyrefly: ignore [missing-import]
 import cutlass.cute as cute
+
+# pyrefly: ignore [missing-import]
 from cutlass import const_expr, Float32, Int32
 
 

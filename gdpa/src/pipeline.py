@@ -26,10 +26,19 @@ for flash attention, with reduced signaling overhead.
 from dataclasses import dataclass
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import cutlass
+
+# pyrefly: ignore [missing-import]
 import cutlass.cute as cute
+
+# pyrefly: ignore [missing-import]
 from cutlass import Boolean, const_expr, Int32
+
+# pyrefly: ignore [missing-import]
 from cutlass.cutlass_dsl import if_generate
+
+# pyrefly: ignore [missing-import]
 from cutlass.pipeline import (
     Agent,
     CooperativeGroup,
@@ -237,6 +246,7 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
             pipeline_init_wait()
 
         return PipelineTmaAsync(
+            # pyrefly: ignore [bad-argument-count]
             sync_object_full,
             sync_object_empty,
             num_stages,
@@ -354,6 +364,7 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
             pipeline_init_wait(cta_layout_vmnk)
 
         return PipelineTmaUmma(
+            # pyrefly: ignore [bad-argument-count]
             sync_object_full,
             sync_object_empty,
             num_stages,
