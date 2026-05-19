@@ -9,6 +9,7 @@ More coming soon!
 | Project | Description | Architecture | Path |
 |---------|-------------|--------------|------|
 | [GDPA](gdpa/) | Generalized Dot Product Attention kernels | Blackwell (SM100) | `gdpa/` |
+| [TLX Block Attention](block_attention/) | Triton TLX block attention kernels | Blackwell (SM100) | `block_attention/` |
 
 ## Requirements
 
