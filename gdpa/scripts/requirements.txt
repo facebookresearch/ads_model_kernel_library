@@ -1,0 +1,23 @@
+# Core dependencies
+torch>=2.10.0
+triton>=3.6.0
+click
+matplotlib
+pandas
+nvidia-cutlass-dsl>=4.4.0
+
+# TVM FFI (required by cutlass-dsl for flash-attn's from_dlpack with enable_tvm_ffi=True)
+apache-tvm-ffi
+
+# Quack kernels (CuTe DSL utilities used by flash-attn cute)
+quack-kernels>=0.2.10
+
+# CUTLASS Blackwell FMHA (NVIDIA Example 77, via FBGEMM)
+# NOTE: This is a separate package from fbgemm-gpu (which only has TBE ops).
+fbgemm-gpu-genai>=1.5.0
+
+# Flash Attention v4 (CuTe DSL implementation by Tri Dao)
+# Install from GitHub main branch (PyPI release may lag behind cutlass-dsl):
+#   FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install \
+#     git+https://github.com/Dao-AILab/flash-attention.git --no-build-isolation
+# flash-attn
