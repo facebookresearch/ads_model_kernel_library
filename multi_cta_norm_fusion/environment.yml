@@ -1,0 +1,10 @@
+name: multi-cta-norm-fusion
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch
+      - fbtriton==3.6.1
