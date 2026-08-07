@@ -33,12 +33,13 @@ def _make_configs(N: int):  # noqa: C901
     """Generate autotune configs sweeping BLOCK_N, MMA groups, and tile sizes."""
     if os.environ.get("ADS_MKL_DISABLE_AUTOTUNE", "0") == "1":
         assert N % 256 == 0
+        # Multiple fixed candidates let early pruning choose one shape-safe config.
         return [
             triton.Config(
                 {
-                    "BLOCK_M": 256,
+                    "BLOCK_M": block_m,
                     "BLOCK_K": 64,
-                    "BLOCK_N": 256,
+                    "BLOCK_N": block_n,
                     "NUM_SMEM_BUFFERS": 3,
                     "NUM_TMEM_BUFFERS": 1,
                     "GROUP_SIZE_M": 8,
@@ -48,15 +49,17 @@ def _make_configs(N: int):  # noqa: C901
                 },
                 num_warps=4,
                 num_stages=1,
-                ctas_per_cga=(N // 256, 1, 1),
+                ctas_per_cga=(N // block_n, 1, 1),
                 pre_hook=_make_pre_hook(
-                    256,
+                    block_m,
                     64,
-                    256,
+                    block_n,
                     2,
                     4,
                 ),
             )
+            for block_m in [128, 256]
+            for block_n in [128, 256]
         ]
     configs = []
     # Each BLOCK_N implies a specific num_ctas = N // BLOCK_N at runtime.
@@ -67,6 +70,9 @@ def _make_configs(N: int):  # noqa: C901
         if N % block_n != 0:
             continue
         num_ctas = N // block_n
+        # Cross-CTA reduction requires at least two CTAs.
+        if num_ctas < 2:
+            continue
         dsmem_slots = num_ctas * 2
         if dsmem_slots & (dsmem_slots - 1) != 0:
             continue
@@ -118,7 +124,7 @@ def _make_configs(N: int):  # noqa: C901
 
 
 def _prune_configs(configs, named_args, **kwargs):
-    """Keep only configs where BLOCK_N evenly divides N and ctas_per_cga matches."""
+    """Keep configs with valid cluster sizing and complete M tiles."""
     N = named_args["N"]
     M = named_args["M"]
     pruned = []
@@ -128,16 +134,26 @@ def _prune_configs(configs, named_args, **kwargs):
         if N % block_n != 0:
             continue
         num_ctas = N // block_n
+        if num_ctas < 2:
+            continue
         if c.ctas_per_cga[0] != num_ctas:
             continue
         # local_alloc buffer count must be power of 2
         dsmem_slots = num_ctas * 2  # NUM_DSMEM_BUFFERS=2
         if dsmem_slots & (dsmem_slots - 1) != 0:
             continue
-        # BLOCK_M must not exceed M (avoid OOB with MMA groups)
-        if block_m > M:
+        # The kernel does not mask partial M tiles.
+        if M % block_m != 0:
             continue
         pruned.append(c)
+    if os.environ.get("ADS_MKL_DISABLE_AUTOTUNE", "0") == "1" and pruned:
+        # Keep disabled-autotune mode deterministic after shape pruning.
+        return [
+            max(
+                pruned,
+                key=lambda c: (c.kwargs["BLOCK_M"], c.kwargs["BLOCK_N"]),
+            )
+        ]
     return pruned
 
 
