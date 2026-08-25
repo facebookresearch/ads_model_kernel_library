@@ -5695,7 +5695,7 @@ def get_tlx_bwd_autotune_config(
         for buf_tem in [1]
         for w in [8]
         for ract in [168, 192, 256]
-        for rred in [80, 108, 128, 144]
+        for rred in [80, 112, 128, 144]
         for rmma in [24, 48]
         for rload in [24]
         for ln_subtile in [1, 2, 4]
