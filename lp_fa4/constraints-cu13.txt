@@ -1,0 +1,9 @@
+# Direct dependency versions validated on GB300 with Python 3.12 and CUDA 13.
+apache-tvm-ffi==0.1.13.post3
+cuda-bindings==13.3.1
+nvidia-cutlass-dsl==4.6.1
+packaging==26.3
+quack-kernels==0.6.2
+torch==2.13.0
+torch-c-dlpack-ext==0.1.5
+typing-extensions==4.16.0

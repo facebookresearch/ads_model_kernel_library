@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lp-fa4"
+version = "0.1.0.dev0"
+description = "Low-precision FlashAttention-4 kernels"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = [
+    "LICENSE",
+    "src/lp_fa4/cute/LICENSE",
+]
+authors = [
+    {name = "Meta Platforms, Inc."},
+    {name = "Tri Dao"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "apache-tvm-ffi>=0.1.6,<0.2",
+    "cuda-bindings>=12.9,<14",
+    "nvidia-cutlass-dsl[cu13]==4.6.1",
+    "packaging",
+    "quack-kernels==0.6.2",
+    "torch",
+    "torch-c-dlpack-ext",
+    "typing-extensions>=4.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/facebookresearch/ads_model_kernel_library"
+Repository = "https://github.com/facebookresearch/ads_model_kernel_library"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"lp_fa4.cute" = ["AUTHORS", "LICENSE"]

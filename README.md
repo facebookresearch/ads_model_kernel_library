@@ -11,6 +11,7 @@ High-performance GPU kernels for Meta Ads Recommendation Systems, developed by M
 | [TLX Multi-CTA Norm Fusion](multi_cta_norm_fusion/) | Triton TLX fused matmul with RMSNorm and LayerNorm kernels | Blackwell (SM100) | `multi_cta_norm_fusion/` | [PyTorch Blog](https://pytorch.org/blog/towards-free-normalization-fusing-normalization-into-gemm-and-attention-kernels/) |
 | [TLX GDPA Megakernel](gdpa_megakernel/) | Triton TLX generalized dot product attention megakernel | Blackwell (SM100) | `gdpa_megakernel/` | [PyTorch Blog](https://pytorch.org/blog/towards-free-normalization-fusing-normalization-into-gemm-and-attention-kernels/) |
 | [TLX Jagged Flash Attention](tlx_jfa/) | Triton TLX jagged flash attention kernel for variable-length sequences | Blackwell (SM100) | `tlx_jfa/` | Coming soon |
+| [LP-FA4](lp_fa4/) | Low-precision FlashAttention-4 kernels with BF16 and MXFP8 APIs | Blackwell (SM10x) | `lp_fa4/` | Coming soon |
 
 ## Requirements
 
@@ -44,6 +45,7 @@ See individual project READMEs for detailed usage:
 - [TLX Multi-CTA Norm Fusion](multi_cta_norm_fusion/README.md)
 - [TLX GDPA Megakernel](gdpa_megakernel/README.md)
 - [TLX Jagged Flash Attention](tlx_jfa/README.md)
+- [LP-FA4 Quick Start](lp_fa4/README.md)
 
 ## Contributors
 

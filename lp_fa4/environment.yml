@@ -1,0 +1,11 @@
+name: lp-fa4
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - setuptools>=77
+      - wheel
+      - -c constraints-cu13.txt
+      - -e .[dev]
