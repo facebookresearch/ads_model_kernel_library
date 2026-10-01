@@ -6964,7 +6964,7 @@ def gdpa_backward_tlx(
                         qlen, start_n, BLOCK_M1, BLOCK_N1, WINDOW_SIZE
                     )
 
-                    for i in tl.range(0, num_steps, 1, num_stages=0):
+                    for i in tl.range(0, num_steps, 1, num_stages=1):
                         q_buf_id, q_phase = _get_bufidx_phase(
                             accum_cnt_inner + i, NUM_BUFFERS_Q
                         )
