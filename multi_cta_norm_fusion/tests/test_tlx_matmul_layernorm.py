@@ -1,12 +1,13 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
-# pyre-ignore-all-errors
-
 """Accuracy tests for TLX fused matmul + LayerNorm forward kernels on B200."""
 
 import unittest
 
+# pyrefly: ignore [missing-import]
 from oss_test_utils import assert_close, skip_unless_blackwell, torch
+
+# pyrefly: ignore [missing-import]
 from tlx_matmul_layernorm import tlx_matmul_layernorm_fwd
 
 HAS_TLX_KERNEL = True
@@ -14,7 +15,7 @@ HAS_TLX_KERNEL = True
 
 class TLXMatmulLayerNormTest(unittest.TestCase):
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_fused_layernorm_forward(self):
+    def test_fused_layernorm_forward(self) -> None:
         device = "cuda"
         dtype = torch.bfloat16
         eps = 1e-5
