@@ -1,7 +1,5 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 
-# pyre-ignore-all-errors
-
 """Accuracy tests for TLX fused matmul + RMSNorm forward kernels on B200."""
 
 import unittest
@@ -14,7 +12,7 @@ HAS_TLX_KERNEL = True
 
 class TLXMatmulRMSNormTest(unittest.TestCase):
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_fused_rmsnorm_forward(self):
+    def test_fused_rmsnorm_forward(self) -> None:
         device = "cuda"
         dtype = torch.bfloat16
         torch.manual_seed(42)
