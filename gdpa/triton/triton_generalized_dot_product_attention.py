@@ -1566,7 +1566,7 @@ def _gdpa_bwd_dkdv(
             )
             qT = tl.trans(q)
         else:
-            qT = tl.load(qT_ptrs, mask=qmask)
+            qT = tl.load(qT_ptrs, mask=qmask, other=0.0)
 
         qT = _apply_all_encodings_bwd(
             qT,
@@ -1600,7 +1600,7 @@ def _gdpa_bwd_dkdv(
                 ],
             )
         else:
-            do = tl.load(do_ptrs, mask=omask)
+            do = tl.load(do_ptrs, mask=omask, other=0.0)
 
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
         pT = qkT
@@ -1744,8 +1744,8 @@ def _gdpa_bwd_dq(
             vT = tl.trans(v)
             # vT = tl.where(kmask, vT, 0.0)
         else:
-            kT = tl.load(kT_ptrs, mask=kmask)
-            vT = tl.load(vT_ptrs, mask=kmask)
+            kT = tl.load(kT_ptrs, mask=kmask, other=0.0)
+            vT = tl.load(vT_ptrs, mask=kmask, other=0.0)
 
         qk = tl.dot(q, kT)
         if activation_enum_int == 0:
@@ -2277,10 +2277,12 @@ def _gdpa_bwd_compute(
             k = tl.load(
                 K + offs_n[:, None] * stride_km + offs_k[None, :] * stride_d,
                 mask=kmask,
+                other=0.0,
             )
             v = tl.load(
                 V + offs_n[:, None] * stride_km + offs_k[None, :] * stride_d,
                 mask=kmask,
+                other=0.0,
             )
 
         start_m_inner = 0
@@ -2470,10 +2472,12 @@ def _gdpa_bwd_compute(
                 q = tl.load(
                     Q + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_d,
                     mask=qmask,
+                    other=0.0,
                 )
                 do = tl.load(
                     DO + offs_m[:, None] * stride_dom + offs_k[None, :] * stride_d,
                     mask=qmask,
+                    other=0.0,
                 )
             dq = tl.zeros([BLOCK_M2, BLOCK_D], dtype=tl.float32)
 
