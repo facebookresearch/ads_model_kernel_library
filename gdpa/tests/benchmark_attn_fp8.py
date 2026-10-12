@@ -34,8 +34,15 @@ from ..src.interface import (
 
 
 def flops(
-    batch, nheads, seqlen_q, seqlen_k, headdim, headdim_v=None, causal=False, mode="fwd"
-):
+    batch: int,
+    nheads: int,
+    seqlen_q: int,
+    seqlen_k: int,
+    headdim: int,
+    headdim_v: int | None = None,
+    causal: bool = False,
+    mode: str = "fwd",
+) -> float:
     """
     Calculate FLOPs for attention.
 
@@ -59,7 +66,7 @@ def flops(
     return f if mode == "fwd" else (2.5 * f if mode == "bwd" else 3.5 * f)
 
 
-def compute_error_metrics(pred: torch.Tensor, ref: torch.Tensor) -> dict:
+def compute_error_metrics(pred: torch.Tensor, ref: torch.Tensor) -> dict[str, float]:
     """Compute error metrics between prediction and reference."""
     pred_f32 = pred.float()
     ref_f32 = ref.float()
@@ -300,7 +307,7 @@ def benchmark_fp8(activation: str = "fast_gelu") -> None:
         print(f"{'=' * 80}")
 
 
-def benchmark_fp8_backward(activation: str = "gelu"):
+def benchmark_fp8_backward(activation: str = "gelu") -> None:
     """Run FP8 E4M3 backward pass benchmark with accuracy verification."""
     device = "cuda"
     generate_traces = True
@@ -451,7 +458,7 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         mode="bwd",
     )
 
-    def bench_backward_bf16():
+    def bench_backward_bf16() -> None:
         q = q_fp32.to(torch.bfloat16).requires_grad_(True)
         k = k_fp32.to(torch.bfloat16).requires_grad_(True)
         v = v_fp32.to(torch.bfloat16).requires_grad_(True)
@@ -466,7 +473,7 @@ def benchmark_fp8_backward(activation: str = "gelu"):
         )
         torch.autograd.grad(out, (q, k, v), dout_bf16)
 
-    def bench_backward_fp8():
+    def bench_backward_fp8() -> None:
         q = q_fp32.to(torch.float8_e4m3fn).requires_grad_(True)
         k = k_fp32.to(torch.float8_e4m3fn).requires_grad_(True)
         v = v_fp32.to(torch.float8_e4m3fn).requires_grad_(True)
