@@ -17,7 +17,15 @@ except Exception:
     HAS_TLX_KERNEL = False
 
 
-def _make_dense_jagged_inputs(*, batch, seqlen, heads, dim, dtype, device):
+def _make_dense_jagged_inputs(
+    *,
+    batch: int,
+    seqlen: int,
+    heads: int,
+    dim: int,
+    dtype: torch.dtype,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     total = batch * seqlen
     q = torch.randn(total, heads, dim, device=device, dtype=dtype)
     k = torch.randn(total, heads, dim, device=device, dtype=dtype)
@@ -32,7 +40,13 @@ def _make_dense_jagged_inputs(*, batch, seqlen, heads, dim, dtype, device):
     return q, k, v, offsets
 
 
-def _gdpa_reference(q, k, v, offsets, activation):
+def _gdpa_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    offsets: torch.Tensor,
+    activation: str,
+) -> torch.Tensor:
     act = get_pytorch_activation(activation)
     out = torch.empty_like(q)
     for batch_id in range(offsets.numel() - 1):
@@ -49,7 +63,7 @@ def _gdpa_reference(q, k, v, offsets, activation):
 
 class TLXGDPAMegakernelTest(unittest.TestCase):
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_fused_rmsnorm_matches_reference(self):
+    def test_fused_rmsnorm_matches_reference(self) -> None:
         device = "cuda"
         dtype = torch.bfloat16
         activation = "fast_gelu"
@@ -91,7 +105,7 @@ class TLXGDPAMegakernelTest(unittest.TestCase):
         assert_close(out, ref, atol=3e-2, rtol=3e-2)
 
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_fused_layernorm_and_rmsnorm_matches_reference(self):
+    def test_fused_layernorm_and_rmsnorm_matches_reference(self) -> None:
         device = "cuda"
         dtype = torch.bfloat16
         activation = "fast_gelu"
