@@ -12,7 +12,12 @@ from tlx_rmsnorm_matmul import matmul_tma_set_block_size_hook, tlx_rmsnorm_matmu
 HAS_TLX_KERNEL = True
 
 
-def rmsnorm_matmul_reference(x, b, weight=None, eps=1e-6):
+def rmsnorm_matmul_reference(
+    x: torch.Tensor,
+    b: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
     """Reference: RMSNorm(X, weight) @ B in fp32."""
     xf = x.float()
     bf = b.float()
@@ -26,7 +31,7 @@ def rmsnorm_matmul_reference(x, b, weight=None, eps=1e-6):
 
 class TLXRMSNormMatmulTest(unittest.TestCase):
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_fused_rmsnorm_matmul(self):
+    def test_fused_rmsnorm_matmul(self) -> None:
         """Fused RMSNorm matmul: C = diag(rrms) @ (X @ B_w)."""
         device = "cuda"
         dtype = torch.bfloat16
@@ -44,7 +49,7 @@ class TLXRMSNormMatmulTest(unittest.TestCase):
                         assert_close(out, ref, atol=3e-2, rtol=3e-2)
 
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_plain_matmul(self):
+    def test_plain_matmul(self) -> None:
         """Unfused matmul (fused_rmsnorm=False) matches torch.matmul."""
         device = "cuda"
         dtype = torch.bfloat16
@@ -62,7 +67,7 @@ class TLXRMSNormMatmulTest(unittest.TestCase):
                         assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_bf16_epilogue_scale(self):
+    def test_bf16_epilogue_scale(self) -> None:
         """BF16 epilogue scale mode stays within fused RMSNorm matmul tolerance."""
         device = "cuda"
         torch.manual_seed(42)
