@@ -49,7 +49,7 @@ BWD_TOL = {"atol": 2e-2, "rtol": 2e-2}
 
 class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_pma_broadcast_q_jagged_kv(self):
+    def test_pma_broadcast_q_jagged_kv(self) -> None:
         """One shared query attending to jagged key/value sequences.
 
         The production PMA shape. Load balancing is enabled and the shared
@@ -114,12 +114,12 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         assert_close(opt_v.grad, ref_v.grad, **BWD_TOL)
 
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_sliding_window(self):
+    def test_sliding_window(self) -> None:
         """Banded attention. Windowed backwards are gated to the 1-CTA kernel."""
         self._run_vs_pytorch(seq_lens=[128, 37, 200], window_size=32)
 
     @skip_unless_blackwell(HAS_TLX_KERNEL)
-    def test_dense_non_broadcast(self):
+    def test_dense_non_broadcast(self) -> None:
         """Uniform sequence lengths, no broadcast.
 
         Length 128 for every sequence gives stats offsets 0/128/256/384, all
@@ -127,7 +127,7 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         """
         self._run_vs_pytorch(seq_lens=[128, 128, 128], window_size=None)
 
-    def _run_vs_pytorch(self, *, seq_lens, window_size):
+    def _run_vs_pytorch(self, *, seq_lens: list[int], window_size: int | None) -> None:
         sm_scale = 1.0 / math.sqrt(DIM)
         q, k, v, q_offsets, kv_offsets = make_jagged_qkv(
             seq_lens=seq_lens,
@@ -140,7 +140,7 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         )
         grad_out = torch.randn_like(q)
 
-        def _leaves():
+        def _leaves() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             return (
                 q.clone().detach().requires_grad_(True),
                 k.clone().detach().requires_grad_(True),
