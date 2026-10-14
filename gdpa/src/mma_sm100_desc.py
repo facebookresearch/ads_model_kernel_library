@@ -178,7 +178,7 @@ def make_instr_desc(
     return desc & 0xFFFF_FFFF  # ensure 32-bit result
 
 
-def mma_op_to_idesc(op: cute.nvgpu.tcgen05.mma.MmaOp):
+def mma_op_to_idesc(op: cute.nvgpu.tcgen05.mma.MmaOp) -> int:
     return make_instr_desc(
         op.a_dtype,
         op.b_dtype,
