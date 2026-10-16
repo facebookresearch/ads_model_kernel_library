@@ -10,8 +10,8 @@ High-performance GPU kernels for Meta Ads Recommendation Systems, developed by M
 | [TLX Block Attention](block_attention/) | Triton TLX block attention kernels | Blackwell (SM100) | `block_attention/` | [PyTorch Blog](https://pytorch.org/blog/tlx-block-attention-a-warp-specialized-blackwell-kernel-for-fixed-block-sparse-self-attention/) |
 | [TLX Multi-CTA Norm Fusion](multi_cta_norm_fusion/) | Triton TLX fused matmul with RMSNorm and LayerNorm kernels | Blackwell (SM100) | `multi_cta_norm_fusion/` | [PyTorch Blog](https://pytorch.org/blog/towards-free-normalization-fusing-normalization-into-gemm-and-attention-kernels/) |
 | [TLX GDPA Megakernel](gdpa_megakernel/) | Triton TLX generalized dot product attention megakernel | Blackwell (SM100) | `gdpa_megakernel/` | [PyTorch Blog](https://pytorch.org/blog/towards-free-normalization-fusing-normalization-into-gemm-and-attention-kernels/) |
-| [TLX Jagged Flash Attention](tlx_jfa/) | Triton TLX jagged flash attention kernel for variable-length sequences | Blackwell (SM100) | `tlx_jfa/` | Coming soon |
-| [LP-FA4](lp_fa4/) | Low-precision FlashAttention-4 kernels with BF16 and MXFP8 APIs | Blackwell (SM10x) | `lp_fa4/` | Coming soon |
+| [TLX Jagged Flash Attention](tlx_jfa/) | Triton TLX jagged flash attention kernel for variable-length sequences | Blackwell (SM100) | `tlx_jfa/` | [PyTorch Blog](https://pytorch.org/blog/optimizing-jagged-flash-attention-with-tlx-the-road-toward-sota-fa4-on-blackwell/) |
+| [LP-FA4](lp_fa4/) | Low-precision FlashAttention-4 kernels with BF16 and MXFP8 APIs | Blackwell (SM10x) | `lp_fa4/` | [PyTorch Blog](https://pytorch.org/blog/low-precision-flash-attention-4-end-to-end-block-scaled-attention-for-blackwell/) |
 
 ## Requirements
 

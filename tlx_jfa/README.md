@@ -107,4 +107,4 @@ Backward is supported through autograd; call `.backward()` on the output.
 ## Reference
 
 - Kunlun: <https://arxiv.org/abs/2602.10016> (PMA definition)
-- A PyTorch blog post covering this kernel is in preparation.
+- [Optimizing Jagged Flash Attention with TLX: The Road Toward SOTA FA4 on Blackwell](https://pytorch.org/blog/optimizing-jagged-flash-attention-with-tlx-the-road-toward-sota-fa4-on-blackwell/)
