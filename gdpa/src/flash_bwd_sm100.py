@@ -68,7 +68,7 @@ class FlashAttentionBackwardSm100:
         is_persistent: bool = False,
         deterministic: bool = False,
         activation: str = "fast_gelu",
-    ):
+    ) -> None:
         assert qhead_per_kvhead == 1, (
             "GQA is not supported yet in FlashAttentionBackwardSm100"
         )
@@ -194,7 +194,7 @@ class FlashAttentionBackwardSm100:
         self.buffer_align_bytes = 1024
         self.universal_copy_bits = 128
 
-    def _setup_attributes(self):
+    def _setup_attributes(self) -> None:
         self.Q_stage = 2
         self.dO_stage = 1
         # self.LSE_stage = 1
@@ -206,7 +206,9 @@ class FlashAttentionBackwardSm100:
         assert self.tile_hdim % self.dQ_reduce_ncol == 0
         self.dQaccum_reduce_stage = self.tile_hdim // self.dQ_reduce_ncol
 
-    def _get_tiled_mma(self):
+    def _get_tiled_mma(
+        self,
+    ) -> tuple[cute.TiledMma, cute.TiledMma, cute.TiledMma, cute.TiledMma]:
         cta_group = tcgen05.CtaGroup.ONE
         # S = K @ Q.T, dP = V @ dO.T
         tiled_mma_SdP = sm100_utils_basic.make_trivial_tiled_mma(
@@ -247,7 +249,7 @@ class FlashAttentionBackwardSm100:
         )
         return tiled_mma_SdP, tiled_mma_dK, tiled_mma_dV, tiled_mma_dQ
 
-    def _setup_smem_layout(self):
+    def _setup_smem_layout(self) -> None:
         # S = K @ Q.T
         self.sK_layout = sm100_utils_basic.make_smem_layout_a(
             self.tiled_mma_SdP,
@@ -370,7 +372,7 @@ class FlashAttentionBackwardSm100:
         mdQ_semaphore: Optional[cute.Tensor] = None,
         mdK_semaphore: Optional[cute.Tensor] = None,
         mdV_semaphore: Optional[cute.Tensor] = None,
-    ):
+    ) -> None:
         # For varlen KV, both TMA store with reduce add and non-TMA store have correct accuracy.
         # On smaller Q length, it seems TMA store is faster, on larger, it seems non-TMA store is faster.
         # self.use_tma_store = (
@@ -1260,7 +1262,7 @@ class FlashAttentionBackwardSm100:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
-    ):
+    ) -> None:
         producer_state_Q = cutlass.pipeline.make_pipeline_state(
             cutlass.pipeline.PipelineUserType.Producer, self.Q_stage
         )
@@ -1474,7 +1476,7 @@ class FlashAttentionBackwardSm100:
         block_info: BlockInfo,
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
-    ):
+    ) -> None:
         # [2025-10-21] For reasons I don't understand, putting these partitioning in the main
         # kernel (before warp specialization) is a lot slower tha putting them here.
         # Partition smem / tmem tensors
@@ -1801,7 +1803,7 @@ class FlashAttentionBackwardSm100:
         tiled_copy_r2s_dKV: Optional[cute.TiledCopy],
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
-    ):
+    ) -> None:
         # sLSE_2D = cute.make_tensor(
         #     sLSE.iterator,
         #     cute.make_layout(
@@ -2159,7 +2161,7 @@ class FlashAttentionBackwardSm100:
         SeqlenInfoCls: Callable,
         TileSchedulerCls: Callable,
         mdQ_semaphore: Optional[cute.Tensor],
-    ):
+    ) -> None:
         num_reduce_threads = cute.arch.WARP_SIZE * len(self.reduce_warp_ids)
         tidx = cute.arch.thread_idx()[0] % num_reduce_threads
         warp_idx = cute.arch.make_warp_uniform(
@@ -2266,7 +2268,7 @@ class FlashAttentionBackwardSm100:
 
                 def tma_store_fn(
                     src_idx, dst_idx, tma_atom_dQ, tdQsdQ, tdQgdQ, m_block
-                ):
+                ) -> None:
                     # Fence and barrier to make sure shared memory store is visible to TMA store
                     cute.arch.fence_proxy(
                         cute.arch.ProxyKind.async_shared,
@@ -2362,7 +2364,7 @@ class FlashAttentionBackwardSm100:
         consumer_state_dKV: cutlass.pipeline.PipelineState,
         softmax_scale: Float32,
         SeqlenInfoCls: Callable,
-    ):
+    ) -> cutlass.pipeline.PipelineState:
         wg_idx = (
             cute.arch.thread_idx()[0]
             % (cute.arch.WARP_SIZE * len(self.compute_warp_ids))
