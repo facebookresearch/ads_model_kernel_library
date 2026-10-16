@@ -145,6 +145,10 @@ CUDA_VISIBLE_DEVICES=0 python -m lp_fa4.benchmarks.mxfp8 \
   --output results.json
 ```
 
+## Reference
+
+- [Low-Precision Flash Attention 4: End-to-End Block-Scaled Attention for Blackwell](https://pytorch.org/blog/low-precision-flash-attention-4-end-to-end-block-scaled-attention-for-blackwell/)
+
 ## License
 
 Meta-authored LP-FA4 code is licensed under the Apache License 2.0. The
