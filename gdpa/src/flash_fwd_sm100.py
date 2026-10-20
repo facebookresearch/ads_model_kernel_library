@@ -3365,7 +3365,7 @@ class FlashAttentionForwardSm100:
             return sX
 
     def make_and_init_load_kv_pipeline(
-        self, load_kv_mbar_ptr
+        self, load_kv_mbar_ptr: cute.Pointer
     ) -> cutlass.pipeline.PipelineTmaUmma:
         load_kv_producer_group = cutlass.pipeline.CooperativeGroup(
             cutlass.pipeline.Agent.Thread, len([self.load_warp_id])
