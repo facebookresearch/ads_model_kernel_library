@@ -43,3 +43,4 @@ export PYTHONPATH="$PWD/src:$PYTHONPATH"
 ## Reference
 
 - [Blog] [Towards Free Normalization: Fusing Normalization into GEMM and Attention Kernels](https://pytorch.org/blog/towards-free-normalization-fusing-normalization-into-gemm-and-attention-kernels/)
+- [Paper] [FlashNorm: Fast Normalization for Transformers](https://arxiv.org/abs/2407.09577)
