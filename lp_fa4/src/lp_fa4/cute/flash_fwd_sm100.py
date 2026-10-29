@@ -3841,9 +3841,8 @@ class FlashAttentionForwardSm100:
         tOtO_r2t = thr_tmem_store.partition_D(tOtO_i)
 
         frg_count = self.head_dim_v_padded // corr_tile_size
-        tOrO_frg = cute.make_rmem_tensor((tOrO_t2r_shape, frg_count), self.pv_acc_dtype)
+        tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
         for i in cutlass.range_constexpr(frg_count):
-            tOrO_frg = cute.make_rmem_tensor(tOrO_t2r_shape, self.pv_acc_dtype)
             tOtO_t2r_i = cute.make_tensor(tOtO_t2r.iterator + i * corr_tile_size, tOtO_t2r.layout)
             cute.copy(thr_tmem_load, tOtO_t2r_i, tOrO_frg)
             for j in cutlass.range(0, cute.size(tOrO_frg), 2, unroll_full=True):
