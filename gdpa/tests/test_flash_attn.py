@@ -1370,3 +1370,30 @@ def test_flash_attn_combine(
     assert torch.allclose(out_no_lse, out, atol=1e-5, rtol=1e-5), (
         "Output should be the same regardless of return_lse"
     )
+
+
+def test_flash_attn_varlen_bwd_without_max_seqlen_k() -> None:
+    """Without max_seqlen_k the backward schedules its K tiles by prefix sums over the
+    segments; it must cover every K tile, also of a K segment longer than its Q segment."""
+    device = "cuda"
+    torch.random.manual_seed(0)
+    nheads, d, dtype = 1, 128, torch.bfloat16
+    cu_q = torch.tensor([0, 100, 400], dtype=torch.int32, device=device)
+    cu_k = torch.tensor([0, 300, 400], dtype=torch.int32, device=device)
+    q, k, v, g = [
+        torch.randn(400, nheads, d, device=device, dtype=dtype) * 0.5 for _ in range(4)
+    ]
+    q, k, v = [t.requires_grad_() for t in (q, k, v)]
+    out, _ = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=300,
+        activation="relu",
+    )
+    _, dk, dv = torch.autograd.grad(out, (q, k, v), g)
+    # Every key gets a gradient from some query of its batch.
+    assert dk.abs().amax(dim=(1, 2)).min().item() > 0
+    assert dv.abs().amax(dim=(1, 2)).min().item() > 0

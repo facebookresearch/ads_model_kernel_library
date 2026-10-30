@@ -427,6 +427,9 @@ class SingleTileVarlenScheduler:
         mSeqUsedQ: Optional[cute.Tensor] = None
         qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
         lpt: cutlass.Constexpr[bool] = False
+        is_bwd: cutlass.Constexpr[bool] = False
+        mCuSeqlensK: Optional[cute.Tensor] = None
+        mSeqUsedK: Optional[cute.Tensor] = None
 
         @staticmethod
         @cute.jit
@@ -439,9 +442,14 @@ class SingleTileVarlenScheduler:
                 * args.element_size
                 * args.tile_shape_mn[1]
             )
-            assert args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None, (
-                "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
-            )
+            if cutlass.const_expr(args.is_bwd):
+                assert args.mCuSeqlensK is not None or args.mSeqUsedK is not None, (
+                    "At least one of mCuSeqlensK or mSeqUsedK must be provided"
+                )
+            else:
+                assert args.mCuSeqlensQ is not None or args.mSeqUsedQ is not None, (
+                    "At least one of mCuSeqlensQ or mSeqUsedQ must be provided"
+                )
             return SingleTileVarlenScheduler.Params(
                 num_head=args.num_head,
                 num_batch=args.num_batch,
@@ -452,6 +460,9 @@ class SingleTileVarlenScheduler:
                 mSeqUsedQ=args.mSeqUsedQ,
                 qhead_per_kvhead_packgqa=args.qhead_per_kvhead_packgqa,
                 lpt=args.lpt,
+                is_bwd=args.is_bwd,
+                mCuSeqlensK=args.mCuSeqlensK,
+                mSeqUsedK=args.mSeqUsedK,
             )
 
     def __init__(self, params: Params, tile_idx: Int32, *, loc=None, ip=None) -> None:
@@ -489,16 +500,25 @@ class SingleTileVarlenScheduler:
     def _get_num_m_blocks(self, lane: Int32, bidb_start: Int32) -> Int32:
         params = self.params
         batch_idx = lane + bidb_start
-        if cutlass.const_expr(params.mSeqUsedQ is not None):
+        # The backward's tiles are K (n) blocks: count them from the K lengths.
+        m_seq_used = (
+            params.mSeqUsedK if cutlass.const_expr(params.is_bwd) else params.mSeqUsedQ
+        )
+        m_cu_seqlen = (
+            params.mCuSeqlensK
+            if cutlass.const_expr(params.is_bwd)
+            else params.mCuSeqlensQ
+        )
+        if cutlass.const_expr(m_seq_used is not None):
             seqlen = Int32(0)
             if batch_idx < params.num_batch:
                 # pyrefly: ignore [unsupported-operation]
-                seqlen = params.mSeqUsedQ[batch_idx]
+                seqlen = m_seq_used[batch_idx]
         else:
-            assert params.mCuSeqlensQ is not None
+            assert m_cu_seqlen is not None
             cur_cu_seqlen = Int32(0)
             if batch_idx <= params.num_batch:
-                cur_cu_seqlen = params.mCuSeqlensQ[batch_idx]
+                cur_cu_seqlen = m_cu_seqlen[batch_idx]
             next_cu_seqlen = cute.arch.shuffle_sync_down(cur_cu_seqlen, offset=1)
             seqlen = next_cu_seqlen - cur_cu_seqlen
         if cutlass.const_expr(params.qhead_per_kvhead_packgqa > 1):
