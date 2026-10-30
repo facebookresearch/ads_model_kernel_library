@@ -2875,6 +2875,7 @@ class FlashAttentionForwardSm100:
         )
         tSrS_t2r = cute.make_fragment(tScS_t2r_shape, self.qk_acc_dtype)
         cute.copy(thr_tmem_load, tStS_t2r, tSrS_t2r)
+        cute.arch.fence_view_async_tmem_load()
 
         # Signal MXFwdNamedBarrier after reading S from TMEM
         # This tells MMA warp it's safe to overwrite scale factor region that overlaps with this S
@@ -3096,6 +3097,7 @@ class FlashAttentionForwardSm100:
             o_vec = tOrO_frg.load()
             tSMrO.store(o_vec.to(self.o_dtype))
             cute.copy(tiled_smem_store, tSMrO, tOsO_r2s_i)
+        cute.arch.fence_view_async_tmem_load()
 
         # fence view async shared
         cute.arch.fence_proxy(
