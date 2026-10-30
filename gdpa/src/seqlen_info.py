@@ -47,11 +47,14 @@ class SeqlenInfo:
         seqused: cute.Tensor | None = None,
     ) -> None:
         self.offset = (
+            # pyrefly: ignore[unsupported-operation]
             0 if cutlass.const_expr(cu_seqlens is None) else cu_seqlens[batch_idx]
         )
         if cutlass.const_expr(seqused is not None):
+            # pyrefly: ignore[unsupported-operation]
             self.seqlen = seqused[batch_idx]
         elif cutlass.const_expr(cu_seqlens is not None):
+            # pyrefly: ignore[unsupported-operation]
             self.seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]
         else:
             self.seqlen = seqlen_static
@@ -85,37 +88,47 @@ class SeqlenInfoQK:
         mCuSeqlensSFK: cute.Tensor | None = None,
     ) -> None:
         self.offset_q = (
+            # pyrefly: ignore[unsupported-operation]
             0 if cutlass.const_expr(mCuSeqlensQ is None) else mCuSeqlensQ[batch_idx]
         )
         self.offset_k = (
+            # pyrefly: ignore[unsupported-operation]
             0 if cutlass.const_expr(mCuSeqlensK is None) else mCuSeqlensK[batch_idx]
         )
         # SF offsets: use padded cu_seqlens if provided, otherwise use data offsets
         self.offset_sf_q = (
             self.offset_q
             if cutlass.const_expr(mCuSeqlensSFQ is None)
-            else mCuSeqlensSFQ[batch_idx]
+            else mCuSeqlensSFQ[batch_idx]  # pyrefly: ignore[unsupported-operation]
         )
         self.offset_sf_k = (
             self.offset_k
             if cutlass.const_expr(mCuSeqlensSFK is None)
-            else mCuSeqlensSFK[batch_idx]
+            else mCuSeqlensSFK[batch_idx]  # pyrefly: ignore[unsupported-operation]
         )
         if cutlass.const_expr(mSeqUsedQ is not None):
+            # pyrefly: ignore[unsupported-operation]
             self.seqlen_q = mSeqUsedQ[batch_idx]
         else:
             self.seqlen_q = (
                 seqlen_q_static
                 if cutlass.const_expr(mCuSeqlensQ is None)
-                else mCuSeqlensQ[batch_idx + 1] - self.offset_q
+                else mCuSeqlensQ[
+                    batch_idx + 1
+                ]  # pyrefly: ignore[unsupported-operation]
+                - self.offset_q  # pyrefly: ignore[unsupported-operation]
             )
         if cutlass.const_expr(mSeqUsedK is not None):
+            # pyrefly: ignore[unsupported-operation]
             self.seqlen_k = mSeqUsedK[batch_idx]
         else:
             self.seqlen_k = (
                 seqlen_k_static
                 if cutlass.const_expr(mCuSeqlensK is None)
-                else mCuSeqlensK[batch_idx + 1] - self.offset_k
+                else mCuSeqlensK[
+                    batch_idx + 1
+                ]  # pyrefly: ignore[unsupported-operation]
+                - self.offset_k  # pyrefly: ignore[unsupported-operation]
             )
         self.has_cu_seqlens_q: int = mCuSeqlensQ is not None
         self.has_cu_seqlens_k: int = mCuSeqlensK is not None
