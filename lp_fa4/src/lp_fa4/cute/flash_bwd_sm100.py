@@ -5307,7 +5307,6 @@ class FlashAttentionBackwardSm100:
 
                     # 2) dQ = dS @ K
                     if const_expr(self.blockscaled):
-                        pipeline_S_P.sync_object_empty.wait(0, producer_phase_acc)
                         cute.copy(
                             tiled_copy_s2t_sfds_dq,
                             tCsSFDS_dQ_s2t[
