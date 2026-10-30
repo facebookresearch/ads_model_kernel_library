@@ -69,6 +69,22 @@ def binary_search_le(ptr, value, length):
 
 
 @triton.jit
+def _next_block(q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES):
+    """Advance to the next block of the program's range: the next BLOCK_D rows of the
+    current sequence, else the first block of the next non-empty sequence, wrapping to
+    the next head after the last sequence."""
+    q_current += BLOCK_D
+    while q_current >= Z_next:
+        offset_idx += 1
+        if offset_idx == NUM_BATCHES:
+            offset_idx = 0
+            hidx += 1
+        q_current = tl.load(offsets + offset_idx).to(tl.int32)
+        Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+    return q_current, Z_next, offset_idx, hidx
+
+
+@triton.jit
 def _allocate_buffers(
     BLOCK_D,
     HEAD_DIM,
@@ -220,14 +236,9 @@ def _block_attention(  # noqa: C901
                     v_SMEM_full[buff_idx],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # q@k MMA
         with tlx.async_task(num_warps=1, registers=48):
@@ -256,14 +267,9 @@ def _block_attention(  # noqa: C901
                     mBarriers=[qk_SMEM_free[buff_idx], qk_TMEM_full[tmem_idx]],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # Softmax load P, V
         with tlx.async_task(num_warps=4, registers=120):
@@ -307,14 +313,9 @@ def _block_attention(  # noqa: C901
                 tlx.fence_async_shared()
                 tlx.barrier_arrive(pv_SMEM_full[buff_idx])
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # p@v MMA
         with tlx.async_task(num_warps=1, registers=48):
@@ -347,14 +348,9 @@ def _block_attention(  # noqa: C901
                     ],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # Epilogue
         with tlx.async_task(num_warps=8, registers=200):
@@ -394,14 +390,9 @@ def _block_attention(  # noqa: C901
                     # else:
                     #     desc_out.store([q_current, hidx * HEAD_DIM], fin)
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
 
 def get_batches_old(offsets, BLOCK_D, NUM_SMS, HEADS):
@@ -1217,14 +1208,9 @@ def _block_attention_backward(  # noqa: C901
                         sinu_SMEM_full[sinu_buff_idx],
                     )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # MMA
         with tlx.async_task(num_warps=1, registers=48):
@@ -1257,14 +1243,9 @@ def _block_attention_backward(  # noqa: C901
                     ],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # Softmax load P
         with tlx.async_task(num_warps=4, registers=120):
@@ -1329,14 +1310,9 @@ def _block_attention_backward(  # noqa: C901
                 tlx.barrier_arrive(p_SMEM_full[buff_idx])
                 tlx.barrier_arrive(p_fp32_SMEM_full[p_fp32_buff_idx])
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # DV
         with tlx.async_task(num_warps=1, registers=48):
@@ -1371,14 +1347,9 @@ def _block_attention_backward(  # noqa: C901
                     ],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # Di,DS
         with tlx.async_task(num_warps=4, registers=120):
@@ -1443,14 +1414,9 @@ def _block_attention_backward(  # noqa: C901
                 # Di = rowsum(P ⊙ dP)
                 # dS = P ⊙ (dP - Di)
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         ## MMA Dq, Dk
         with tlx.async_task(num_warps=1, registers=48):
@@ -1498,14 +1464,9 @@ def _block_attention_backward(  # noqa: C901
                     ],
                 )
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
         # Epilogue
         with tlx.async_task(num_warps=8, registers=200):
@@ -1674,14 +1635,9 @@ def _block_attention_backward(  # noqa: C901
                         )
                         tl.store(out_ptrs, dkLocal, mask=mask)
 
-                q_current += BLOCK_D
-                if q_current >= Z_next:
-                    q_current = Z_next % TOTAL_LEN_Q
-                    offset_idx += 1
-                if offset_idx == NUM_BATCHES:
-                    offset_idx = 0
-                    hidx += 1
-                Z_next = tl.load(offsets + offset_idx + 1).to(tl.int32)
+                q_current, Z_next, offset_idx, hidx = _next_block(
+                    q_current, Z_next, offset_idx, hidx, offsets, BLOCK_D, NUM_BATCHES
+                )
 
     pass
 

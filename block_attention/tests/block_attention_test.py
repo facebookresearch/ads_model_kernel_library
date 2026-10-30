@@ -77,6 +77,33 @@ def generate_jagged_data(
     }
 
 
+def generate_jagged_data_from_lengths(
+    lengths: list[int],
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    extra_rows: int = 0,
+) -> dict[str, torch.Tensor]:
+    offsets = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=device)
+    offsets[1:] = torch.cumsum(torch.tensor(lengths, device=device), dim=0).to(
+        torch.int32
+    )
+    total = int(offsets[-1].item()) + extra_rows
+
+    q = torch.randn(total, H, D, device=device, dtype=dtype)
+    k = torch.randn(total, H, D, device=device, dtype=dtype)
+    v = torch.randn(total, H, D, device=device, dtype=dtype)
+    do = torch.randn(total, H, D, device=device, dtype=dtype)
+    return {
+        "q_weights": q,
+        "k_weights": k,
+        "v_weights": v,
+        "do": do,
+        "q_offsets": offsets,
+    }
+
+
 def snr_db(signal: torch.Tensor, reference: torch.Tensor, eps: float = 1e-12) -> float:
     signal_f = signal.float()
     reference_f = reference.float()
@@ -410,6 +437,62 @@ class BlockAttentionTest(unittest.TestCase):
         self.assertIsNotNone(q.grad)
         self.assertIsNotNone(k.grad)
         self.assertIsNotNone(v.grad)
+
+    def _check_forward_and_backward_vs_fp32_ref(
+        self, data: dict[str, torch.Tensor], use_cpu_offsets: bool
+    ) -> None:
+        offsets = data["q_offsets"]
+        offsets_cpu = offsets.cpu()
+        q = data["q_weights"].clone().detach().requires_grad_(True)
+        k = data["k_weights"].clone().detach().requires_grad_(True)
+        v = data["v_weights"].clone().detach().requires_grad_(True)
+        do = data["do"]
+
+        out = tlx_block_attention(
+            q, k, v, offsets, offsets_cpu if use_cpu_offsets else None
+        )[0]
+        out.backward(do)
+        torch.cuda.synchronize()
+
+        scale = 1.0 / math.sqrt(q.shape[-1])
+        ref_out = pytorch_block_attention_forward_fp32(
+            q.detach(), k.detach(), v.detach(), offsets_cpu, scale=scale
+        )
+        ref_dq, ref_dk, ref_dv = pytorch_block_attention_backward_fp32(
+            q.detach(), k.detach(), v.detach(), do, offsets_cpu, scale=scale
+        )
+
+        # Only rows inside a sequence are defined outputs.
+        rows = torch.zeros(q.shape[0], dtype=torch.bool, device=q.device)
+        for b in range(offsets_cpu.numel() - 1):
+            rows[int(offsets_cpu[b]) : int(offsets_cpu[b + 1])] = True
+
+        assert q.grad is not None
+        assert k.grad is not None
+        assert v.grad is not None
+        for got, ref in (
+            (out, ref_out),
+            (q.grad, ref_dq),
+            (k.grad, ref_dk),
+            (v.grad, ref_dv),
+        ):
+            torch.testing.assert_close(
+                got[rows].float(), ref[rows].float().to(q.device), rtol=0.2, atol=0.1
+            )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_tlx_block_attention_rows_past_last_offset(self) -> None:
+        torch.manual_seed(13)
+        device = torch.device("cuda")
+        g = torch.Generator().manual_seed(13)
+        lengths = torch.randint(1, 257, (64,), generator=g).tolist()
+        # Token tensors longer than offsets[-1].
+        data = generate_jagged_data_from_lengths(
+            lengths, H=8, D=64, dtype=torch.bfloat16, device=device, extra_rows=37
+        )
+        for use_cpu_offsets in (True, False):
+            with self.subTest(use_cpu_offsets=use_cpu_offsets):
+                self._check_forward_and_backward_vs_fp32_ref(data, use_cpu_offsets)
 
 
 if __name__ == "__main__":
