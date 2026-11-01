@@ -113,7 +113,7 @@ class SeqlenInfoQK:
             self.seqlen_q = (
                 seqlen_q_static
                 if cutlass.const_expr(mCuSeqlensQ is None)
-                else mCuSeqlensQ[
+                else mCuSeqlensQ[  # pyrefly: ignore [unsupported-operation]
                     batch_idx + 1
                 ]  # pyrefly: ignore[unsupported-operation]
                 - self.offset_q  # pyrefly: ignore[unsupported-operation]
@@ -125,7 +125,7 @@ class SeqlenInfoQK:
             self.seqlen_k = (
                 seqlen_k_static
                 if cutlass.const_expr(mCuSeqlensK is None)
-                else mCuSeqlensK[
+                else mCuSeqlensK[  # pyrefly: ignore [unsupported-operation]
                     batch_idx + 1
                 ]  # pyrefly: ignore[unsupported-operation]
                 - self.offset_k  # pyrefly: ignore[unsupported-operation]
