@@ -2885,16 +2885,19 @@ class FlashAttentionForwardSm100:
         # - Stage 0: Skip signaling on first_call (MMA hasn't entered N loop yet)
         # - Stage 1: Always signal (skip only on final_call, but we always signal for simplicity)
         if const_expr(self.blockscaled):
+            # Wait for the S load here, before the branch, not inside it. With the wait only
+            # on the arrive paths, ptxas 12.9 (cutlass-dsl 4.4.2) emitted no scoreboard wait
+            # before bar.arrive (SASS on sm_100a and sm_103a), releasing MMA to write scale
+            # factors into S TMEM while the tcgen05.ld was still in flight.
+            cute.arch.fence_view_async_tmem_load()
             if stage == 0:
                 if not is_first:
-                    cute.arch.fence_view_async_tmem_load()
                     cute.arch.barrier_arrive(
                         barrier_id=self.mbar_mma_p0_id,
                         number_of_threads=self.mbar_mma_threads,
                     )
             else:
                 # Stage 1: Always signal MMA_P1 - MMA waits on this before writing SF for S0
-                cute.arch.fence_view_async_tmem_load()
                 cute.arch.barrier_arrive(
                     barrier_id=self.mbar_mma_p1_id,
                     number_of_threads=self.mbar_mma_threads,
@@ -2985,19 +2988,20 @@ class FlashAttentionForwardSm100:
                 mbar_ptr + mbar_s0_s1_sequence_offset + (1 - stage) * 4
             )
 
-        for i in cutlass.range_constexpr(
-            cute.size(tStP_r2t.shape[2]) // self.tmem_store_split_divisor * 3
-        ):
+        # first part of P (3/4 of the chunks; clamped: for FP8, 2 // 2 * 3 = 3 > 2 chunks
+        # would store an out-of-bounds chunk over the SFP/SFV columns)
+        num_p_chunks_1 = min(
+            cute.size(tStP_r2t.shape[2]),
+            cute.size(tStP_r2t.shape[2]) // self.tmem_store_split_divisor * 3,
+        )
+        for i in cutlass.range_constexpr(num_p_chunks_1):
             cute.copy(
                 thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i]
             )
         cute.arch.fence_view_async_tmem_store()
         # Notify mma warp that P is ready
         cute.arch.mbarrier_arrive(mbar_ptr + self.mbar_P_full_1_offset + stage)
-        for i in cutlass.range_constexpr(
-            cute.size(tStP_r2t.shape[2]) // self.tmem_store_split_divisor * 3,
-            cute.size(tStP_r2t.shape[2]),
-        ):
+        for i in cutlass.range_constexpr(num_p_chunks_1, cute.size(tStP_r2t.shape[2])):
             cute.copy(
                 thr_tmem_store, tSrP_r2t_f32[None, None, i], tStP_r2t[None, None, i]
             )
