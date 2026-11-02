@@ -677,7 +677,7 @@ def _gdpa_fwd_compute(
             desc_out = tl.make_tensor_descriptor(
                 Out,
                 block_shape=[BLOCK_M // NUM_CONSUMER_GROUPS, BLOCK_D],
-                shape=[end_q.to(tl.int32), HEAD_DIM * H],
+                shape=[(begin_o + end_q - begin_q).to(tl.int32), HEAD_DIM * H],
                 strides=[stride_qm, stride_qk],
             )
 
@@ -819,7 +819,7 @@ def _gdpa_fwd_compute(
             # pyre-ignore[16]: `Optional` has no attribute `load`
             desc_out.store(
                 [
-                    (begin_q + start_m * BLOCK_M).to(tl.int32),
+                    (begin_o + start_m * BLOCK_M).to(tl.int32),
                     (out_offset).to(tl.int32),
                 ],
                 acc.to(Q.dtype.element_ty),

@@ -26,6 +26,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from .. import triton_generalized_dot_product_attention as gdpa
 from ..triton_generalized_dot_product_attention import (
     _check_output_offset,
     cpu_generalized_dot_product_attention,
@@ -511,6 +512,56 @@ class BroadcastQOutputOffsetTestCase(unittest.TestCase):
             generalized_dot_product_attention(
                 q, k, v, q_offsets, k_offsets, 100, 130, broadcast_q=True
             )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10,
+    "needs a Blackwell GPU",
+)
+class ForwardTmaOutputOffsetTestCase(unittest.TestCase):
+    """The TMA forward writes batch b at output_offset[b] (broadcast_q: b * Lq)."""
+
+    def test_tma_forward_broadcast_q_writes_each_batch_at_its_output_offset(
+        self,
+    ) -> None:
+        torch.manual_seed(0)
+        q = torch.randn(100, 2, 64, device="cuda", dtype=torch.bfloat16)
+        k, v = (
+            torch.randn(300, 2, 64, device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        q_offsets = torch.tensor([0, 100], dtype=torch.int32, device="cuda")
+        k_offsets = torch.tensor([0, 130, 190, 300], dtype=torch.int32, device="cuda")
+        o_offsets = torch.tensor([0, 100, 200, 300], dtype=torch.int32, device="cuda")
+        config = gdpa.triton_config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "NUM_CONSUMER_GROUPS": 1},
+            num_stages=1,
+            num_warps=4,
+        )
+        with patch.dict(gdpa.fwd_autotune_configs, {"default": (config,)}):
+            gdpa.get_autotune_fwd_kernel.cache_clear()
+            try:
+                for persistent in (False, True):
+                    out = {
+                        tma: generalized_dot_product_attention(
+                            q,
+                            k,
+                            v,
+                            q_offsets,
+                            k_offsets,
+                            100,
+                            130,
+                            output_offset=o_offsets,
+                            broadcast_q=True,
+                            enable_persistent=persistent,
+                            enable_tma=tma,
+                        )
+                        for tma in (False, True)
+                    }
+                    with self.subTest(persistent=persistent):
+                        torch.testing.assert_close(out[True], out[False])
+            finally:
+                gdpa.get_autotune_fwd_kernel.cache_clear()
 
 
 if __name__ == "__main__":
