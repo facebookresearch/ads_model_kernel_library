@@ -3512,6 +3512,14 @@ def tlx_jagged_flash_attention_backward(  # noqa: C901
         tile_to_head = None
         tile_to_block = None
         lb_total_tiles = 0
+        # The non-LB grid covers max_seq_len_kv keys per sequence, so longer
+        # sequences would leave dK/dV rows unwritten. Checked on device (no sync).
+        if BATCH > 0:
+            torch._assert_async(
+                (k_offsets[1:] - k_offsets[:-1]).max() <= N_CTX_KV,
+                "tlx_jagged_flash_attention backward: a key sequence is "
+                "longer than max_seq_len_kv",
+            )
 
     if use_2cta:
         # Transposed B-operand descriptors over the same tensors. Block shapes

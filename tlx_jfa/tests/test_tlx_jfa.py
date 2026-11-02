@@ -191,6 +191,31 @@ tlx_jagged_flash_attention(
 torch.cuda.synchronize()
 """
 
+# Forward + backward through autograd with max_seq_len_kv = {max_seq_len_kv} and no
+# CPU offsets (the dense backward grid); the longest key sequence is 300.
+SHORT_MAX_SEQ_LEN_KV_SCRIPT = """
+import torch
+from tlx_jagged_flash_attention import tlx_jagged_flash_attention
+
+q_offsets = torch.tensor([0, 128, 300], dtype=torch.int32, device="cuda")
+k_offsets = torch.tensor([0, 300, 400], dtype=torch.int32, device="cuda")
+q, k, v = (
+    torch.randn(n, 2, 128, device="cuda", dtype=torch.bfloat16).requires_grad_()
+    for n in (300, 400, 400)
+)
+out = tlx_jagged_flash_attention(
+    query=q,
+    key=k,
+    value=v,
+    query_offset=q_offsets,
+    key_offset=k_offsets,
+    max_seq_len_q=172,
+    max_seq_len_kv={max_seq_len_kv},
+)[0]
+out.backward(torch.randn_like(out))
+torch.cuda.synchronize()
+"""
+
 
 def _run_in_child(script: str) -> subprocess.CompletedProcess:
     """Run a test script in a fresh Python process, so that a kernel hang or a
@@ -324,6 +349,24 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
             with self.subTest(max_seq_len_q=max_seq_len_q):
                 completed = _run_in_child(
                     SHORT_MAX_SEQ_LEN_Q_SCRIPT.format(max_seq_len_q=max_seq_len_q)
+                )
+                output = completed.stdout + completed.stderr
+                if rejected:
+                    self.assertNotEqual(completed.returncode, 0, output)
+                    self.assertIn("device-side assert", output.lower())
+                else:
+                    self.assertEqual(completed.returncode, 0, output)
+
+    @skip_unless_blackwell(HAS_TLX_KERNEL)
+    def test_rejects_short_max_seq_len_kv(self) -> None:
+        """Without CPU offsets the backward grid covers max_seq_len_kv keys of each
+        sequence, so a longer key sequence used to get uninitialized dK/dV rows and an
+        incomplete dQ. The backward now fails a device-side assert; the control with
+        the true maximum key length must succeed."""
+        for max_seq_len_kv, rejected in ((300, False), (128, True)):
+            with self.subTest(max_seq_len_kv=max_seq_len_kv):
+                completed = _run_in_child(
+                    SHORT_MAX_SEQ_LEN_KV_SCRIPT.format(max_seq_len_kv=max_seq_len_kv)
                 )
                 output = completed.stdout + completed.stderr
                 if rejected:
