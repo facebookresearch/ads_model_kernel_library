@@ -2954,6 +2954,14 @@ def tlx_jagged_flash_attention(  # noqa: C901
         BATCH: int = key_offset.size(0) - 1
     else:
         BATCH: int = query_offset.size(0) - 1
+    # The grid covers max_seq_len_q rows of each query sequence and the kernel
+    # clamps every sequence to it, so a longer one would leave O and M rows
+    # unwritten. Checked on device (no sync).
+    if query_offset.numel() > 1:
+        torch._assert_async(
+            (query_offset[1:] - query_offset[:-1]).max() <= max_seq_len_q,
+            "tlx_jagged_flash_attention: a query sequence is longer than max_seq_len_q",
+        )
 
     q = expect_contiguous(query)
     k = expect_contiguous(key)

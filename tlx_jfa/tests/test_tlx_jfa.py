@@ -169,6 +169,28 @@ for use_cpu_offsets in (False, True):
 print("OK")
 """
 
+# Forward with max_seq_len_q = {max_seq_len_q}; the longest query sequence is 300.
+SHORT_MAX_SEQ_LEN_Q_SCRIPT = """
+import torch
+from tlx_jagged_flash_attention import tlx_jagged_flash_attention
+
+q_offsets = torch.tensor([0, 300, 400], dtype=torch.int32, device="cuda")
+k_offsets = torch.tensor([0, 200, 277], dtype=torch.int32, device="cuda")
+q, k, v = (
+    torch.randn(n, 2, 128, device="cuda", dtype=torch.bfloat16) for n in (400, 277, 277)
+)
+tlx_jagged_flash_attention(
+    query=q,
+    key=k,
+    value=v,
+    query_offset=q_offsets,
+    key_offset=k_offsets,
+    max_seq_len_q={max_seq_len_q},
+    max_seq_len_kv=200,
+)
+torch.cuda.synchronize()
+"""
+
 
 def _run_in_child(script: str) -> subprocess.CompletedProcess:
     """Run a test script in a fresh Python process, so that a kernel hang or a
@@ -291,6 +313,24 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         dense tile schedules)."""
         completed = _run_in_child(ZERO_STEP_KEY_TILES_SCRIPT)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    @skip_unless_blackwell(HAS_TLX_KERNEL)
+    def test_rejects_short_max_seq_len_q(self) -> None:
+        """The forward grid covers max_seq_len_q rows of each query sequence and the
+        kernel clamps every sequence to it, so a longer sequence used to get
+        uninitialized O and M rows. The forward now fails a device-side assert; the
+        control with the true maximum must succeed."""
+        for max_seq_len_q, rejected in ((300, False), (172, True)):
+            with self.subTest(max_seq_len_q=max_seq_len_q):
+                completed = _run_in_child(
+                    SHORT_MAX_SEQ_LEN_Q_SCRIPT.format(max_seq_len_q=max_seq_len_q)
+                )
+                output = completed.stdout + completed.stderr
+                if rejected:
+                    self.assertNotEqual(completed.returncode, 0, output)
+                    self.assertIn("device-side assert", output.lower())
+                else:
+                    self.assertEqual(completed.returncode, 0, output)
 
     def _run_vs_pytorch(self, *, seq_lens: list[int], window_size: int | None) -> None:
         sm_scale = 1.0 / math.sqrt(DIM)
