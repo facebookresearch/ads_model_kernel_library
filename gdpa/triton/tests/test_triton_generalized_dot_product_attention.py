@@ -27,6 +27,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from ..triton_generalized_dot_product_attention import (
+    _check_output_offset,
     cpu_generalized_dot_product_attention,
     create_dummy_tensor,
     expect_contiguous,
@@ -443,6 +444,73 @@ class GeneralizedDotProductAttentionTestCase(unittest.TestCase):
         self.assertTrue(call_args.kwargs["query"].is_contiguous())
         self.assertTrue(call_args.kwargs["key"].is_contiguous())
         self.assertTrue(call_args.kwargs["value"].is_contiguous())
+
+
+class BroadcastQOutputOffsetTestCase(unittest.TestCase):
+    """broadcast_q with 3 batches and no output_offset: query_offset has 2 entries."""
+
+    def test_output_offset_needs_an_entry_per_batch(self) -> None:
+        offsets = torch.zeros(4, dtype=torch.int32)
+        _check_output_offset(offsets, BATCH=4, use_start_end_offsets=False)
+        with self.assertRaisesRegex(ValueError, "output_offset"):
+            _check_output_offset(offsets, BATCH=5, use_start_end_offsets=False)
+        # With start/end offsets the kernels index output_offset[2 * batch].
+        with self.assertRaisesRegex(ValueError, "output_offset"):
+            _check_output_offset(offsets, BATCH=3, use_start_end_offsets=True)
+        _check_output_offset(
+            torch.zeros(5, dtype=torch.int32), BATCH=3, use_start_end_offsets=True
+        )
+
+    def test_hosts_reject_broadcast_q_without_output_offset(self) -> None:
+        # Meta tensors dispatch to the Triton host functions, which check
+        # output_offset before they launch a kernel: no GPU needed.
+        q = torch.empty(100, 2, 64, device="meta", dtype=torch.bfloat16)
+        kv = torch.empty(300, 2, 64, device="meta", dtype=torch.bfloat16)
+        q_offsets = torch.empty(2, dtype=torch.int32, device="meta")
+        k_offsets = torch.empty(4, dtype=torch.int32, device="meta")
+        with self.assertRaisesRegex(ValueError, "output_offset has 2 entries but 3"):
+            torch.ops.gdpa.generalized_dot_product_attention(
+                query=q,
+                key=kv,
+                value=kv,
+                query_offset=q_offsets,
+                key_offset=k_offsets,
+                max_seq_len_q=100,
+                max_seq_len_kv=130,
+                broadcast_q=True,
+            )
+        with self.assertRaisesRegex(ValueError, "output_offset has 2 entries but 3"):
+            torch.ops.gdpa.generalized_dot_product_attention_backward(
+                do=q,
+                q=q,
+                k=kv,
+                v=kv,
+                o=q,
+                q_offsets=q_offsets,
+                k_offsets=k_offsets,
+                BATCH=3,
+                N_HEAD=2,
+                Q_GROUP=1,
+                N_CTX=100,
+                N_CTX_KV=130,
+                BLOCK_D=64,
+                HEAD_DIM=64,
+                broadcast_q=True,
+            )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
+    def test_broadcast_q_without_output_offset_rejects_three_batches(self) -> None:
+        q = torch.randn(100, 2, 64, device="cuda", dtype=torch.bfloat16)
+        k, v = (
+            torch.randn(300, 2, 64, device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        q_offsets = torch.tensor([0, 100], dtype=torch.int32, device="cuda")
+        k_offsets = torch.tensor([0, 130, 190, 300], dtype=torch.int32, device="cuda")
+        with self.assertRaisesRegex(ValueError, "output_offset"):
+            generalized_dot_product_attention(
+                q, k, v, q_offsets, k_offsets, 100, 130, broadcast_q=True
+            )
 
 
 if __name__ == "__main__":

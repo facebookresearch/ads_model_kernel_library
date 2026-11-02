@@ -3020,6 +3020,18 @@ def _create_output_tensor(
     return o
 
 
+def _check_output_offset(
+    output_offset: torch.Tensor, BATCH: int, use_start_end_offsets: bool
+) -> None:
+    # The kernels load output_offset[off_z] (off_z = 2 * batch with start/end offsets).
+    needed = 2 * BATCH - 1 if use_start_end_offsets else BATCH
+    if output_offset.size(0) < needed:
+        raise ValueError(
+            f"output_offset has {output_offset.size(0)} entries but {BATCH} batches need "
+            f"{needed}: broadcast_q with more than 2 batches needs an output_offset"
+        )
+
+
 def _compute_kernel_strides(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -3151,6 +3163,7 @@ def generalized_dot_product_attention(
     BATCH = _compute_batch_size(
         query_offset, key_offset, broadcast_q, use_start_end_offsets
     )
+    _check_output_offset(output_offset, BATCH, use_start_end_offsets)
 
     o = _create_output_tensor(
         query,
@@ -3584,6 +3597,7 @@ def generalized_dot_product_attention_backward(
 
     if output_offset is None:
         output_offset = q_offsets
+    _check_output_offset(output_offset, BATCH, use_start_end_offsets)
 
     NUM_SMS = (
         get_num_sms() or 1000000
