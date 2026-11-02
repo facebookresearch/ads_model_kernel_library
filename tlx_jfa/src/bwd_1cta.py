@@ -754,65 +754,90 @@ def _attn_bwd_ws(  # noqa: C901, TR001
                         curr_m += step_m
                         blk_idx += 1
 
-                    # epilogue - async TMA store for dK/dV
-                    kv_buf_id, kv_phase = _get_bufidx_phase(kv_tile_idx, NUM_BUFFERS_KV)
+                    # num_steps <= 0: no query block reaches this K tile (an empty query
+                    # sequence, or every query row outside the window), so the MMA and
+                    # load tasks skip it. Tested here, not in the tile guard: a guard
+                    # implying num_steps > 0 makes the tail check above unconditional
+                    # and ptxas then spills in the softmax loop.
+                    if num_steps > 0:
+                        # epilogue - async TMA store for dK/dV
+                        kv_buf_id, kv_phase = _get_bufidx_phase(
+                            kv_tile_idx, NUM_BUFFERS_KV
+                        )
 
-                    tlx.barrier_wait(dv_fulls[kv_buf_id], kv_phase)
-                    slice_size: tl.constexpr = BLOCK_D // EPILOGUE_SUBTILE
-                    desc_dv = tl.make_tensor_descriptor(
-                        dV,
-                        shape=[end_k.to(tl.int32), HEAD_DIM * H],
-                        strides=[HEAD_DIM * H, 1],
-                        block_shape=[BLOCK_N1, BLOCK_D // EPILOGUE_SUBTILE],
-                    )
-                    desc_dk = tl.make_tensor_descriptor(
-                        dK,
-                        shape=[end_k.to(tl.int32), HEAD_DIM * H],
-                        strides=[HEAD_DIM * H, 1],
-                        block_shape=[BLOCK_N1, BLOCK_D // EPILOGUE_SUBTILE],
-                    )
-                    for slice_id in tl.static_range(EPILOGUE_SUBTILE):
-                        dv_slice = tlx.local_slice(
-                            dv_tiles[kv_buf_id],
-                            [0, slice_id * slice_size],
-                            [BLOCK_N1, slice_size],
+                        tlx.barrier_wait(dv_fulls[kv_buf_id], kv_phase)
+                        slice_size: tl.constexpr = BLOCK_D // EPILOGUE_SUBTILE
+                        desc_dv = tl.make_tensor_descriptor(
+                            dV,
+                            shape=[end_k.to(tl.int32), HEAD_DIM * H],
+                            strides=[HEAD_DIM * H, 1],
+                            block_shape=[BLOCK_N1, BLOCK_D // EPILOGUE_SUBTILE],
                         )
-                        dv = tlx.local_load(dv_slice)
-                        tlx.local_store(dkv_store_buf[0], dv.to(tlx.dtype_of(desc_dv)))
-                        tlx.fence_async_shared()
-                        tlx.async_descriptor_store(
-                            desc_dv,
-                            dkv_store_buf[0],
-                            [
-                                (begin_k + start_n).to(tl.int32),
-                                (kv_offset + slice_id * slice_size).to(tl.int32),
-                            ],
+                        desc_dk = tl.make_tensor_descriptor(
+                            dK,
+                            shape=[end_k.to(tl.int32), HEAD_DIM * H],
+                            strides=[HEAD_DIM * H, 1],
+                            block_shape=[BLOCK_N1, BLOCK_D // EPILOGUE_SUBTILE],
                         )
-                        tlx.async_descriptor_store_wait(0)
-                    tlx.barrier_arrive(dv_empties[kv_buf_id])
+                        for slice_id in tl.static_range(EPILOGUE_SUBTILE):
+                            dv_slice = tlx.local_slice(
+                                dv_tiles[kv_buf_id],
+                                [0, slice_id * slice_size],
+                                [BLOCK_N1, slice_size],
+                            )
+                            dv = tlx.local_load(dv_slice)
+                            tlx.local_store(
+                                dkv_store_buf[0], dv.to(tlx.dtype_of(desc_dv))
+                            )
+                            tlx.fence_async_shared()
+                            tlx.async_descriptor_store(
+                                desc_dv,
+                                dkv_store_buf[0],
+                                [
+                                    (begin_k + start_n).to(tl.int32),
+                                    (kv_offset + slice_id * slice_size).to(tl.int32),
+                                ],
+                            )
+                            tlx.async_descriptor_store_wait(0)
+                        tlx.barrier_arrive(dv_empties[kv_buf_id])
 
-                    tlx.barrier_wait(dk_fulls[kv_buf_id], kv_phase)
-                    for slice_id in tl.static_range(EPILOGUE_SUBTILE):
-                        dk_slice = tlx.local_slice(
-                            dk_tiles[kv_buf_id],
-                            [0, slice_id * slice_size],
-                            [BLOCK_N1, slice_size],
-                        )
-                        dk = tlx.local_load(dk_slice)
-                        dk *= sm_scale
-                        tlx.local_store(dkv_store_buf[0], dk.to(tlx.dtype_of(desc_dk)))
-                        tlx.fence_async_shared()
-                        tlx.async_descriptor_store(
-                            desc_dk,
-                            dkv_store_buf[0],
-                            [
-                                (begin_k + start_n).to(tl.int32),
-                                (kv_offset + slice_id * slice_size).to(tl.int32),
-                            ],
-                        )
-                        tlx.async_descriptor_store_wait(0)
-                    tlx.barrier_arrive(dk_empties[kv_buf_id])
-                    kv_tile_idx += 1
+                        tlx.barrier_wait(dk_fulls[kv_buf_id], kv_phase)
+                        for slice_id in tl.static_range(EPILOGUE_SUBTILE):
+                            dk_slice = tlx.local_slice(
+                                dk_tiles[kv_buf_id],
+                                [0, slice_id * slice_size],
+                                [BLOCK_N1, slice_size],
+                            )
+                            dk = tlx.local_load(dk_slice)
+                            dk *= sm_scale
+                            tlx.local_store(
+                                dkv_store_buf[0], dk.to(tlx.dtype_of(desc_dk))
+                            )
+                            tlx.fence_async_shared()
+                            tlx.async_descriptor_store(
+                                desc_dk,
+                                dkv_store_buf[0],
+                                [
+                                    (begin_k + start_n).to(tl.int32),
+                                    (kv_offset + slice_id * slice_size).to(tl.int32),
+                                ],
+                            )
+                            tlx.async_descriptor_store_wait(0)
+                        tlx.barrier_arrive(dk_empties[kv_buf_id])
+                        kv_tile_idx += 1
+                    else:
+                        # dK/dV of the tile are zero: store them without the dK/dV
+                        # barriers or kv_tile_idx, which only count tiles the MMA runs.
+                        zero_ncol: tl.constexpr = BLOCK_D // EPILOGUE_SUBTILE
+                        zero_rows = (begin_k + offs_n).to(tl.int64) * (HEAD_DIM * H)
+                        zero_row_mask = offs_n[:, None] < klen
+                        zeros = tl.zeros([BLOCK_N1, zero_ncol], dK.dtype.element_ty)
+                        for slice_id in tl.static_range(EPILOGUE_SUBTILE):
+                            offs_d = slice_id * zero_ncol + tl.arange(0, zero_ncol)
+                            zero_offs = zero_rows[:, None] + kv_offset + offs_d[None, :]
+                            zero_mask = zero_row_mask & (offs_d[None, :] < HEAD_DIM)
+                            tl.store(dV + zero_offs, zeros, mask=zero_mask)
+                            tl.store(dK + zero_offs, zeros, mask=zero_mask)
                 if ENABLE_CLC:
                     if USE_I64_IDX:
                         tile_idx = tlx.clc_consumer(clc_context, clc_phase_consumer).to(
@@ -864,16 +889,16 @@ def _attn_bwd_ws(  # noqa: C901, TR001
                 start_n = pid * BLOCK_N1
                 off_h2 = off_h.to(tl.int64)
 
-                if start_n < klen:
+                num_steps, start_m = bwd_calculate_num_steps(
+                    qlen, start_n, BLOCK_M1, BLOCK_N1, WINDOW_SIZE
+                )
+                if start_n < klen and num_steps > 0:
                     kv_buf_id, kv_phase = _get_bufidx_phase(kv_tile_idx, NUM_BUFFERS_KV)
                     tlx.barrier_wait(k_fulls[kv_buf_id], kv_phase)
                     tlx.barrier_wait(v_fulls[kv_buf_id], kv_phase)
 
                     # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
                     tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
-                    num_steps, start_m = bwd_calculate_num_steps(
-                        qlen, start_n, BLOCK_M1, BLOCK_N1, WINDOW_SIZE
-                    )
 
                     # -----------------------------------------------------------
                     # Prolog
@@ -1102,10 +1127,10 @@ def _attn_bwd_ws(  # noqa: C901, TR001
                 klen = end_k - begin_k
                 start_n = pid * BLOCK_N1
                 off_h2 = off_h.to(tl.int64)
-                if start_n < klen:
-                    num_steps, start_m = bwd_calculate_num_steps(
-                        qlen, start_n, BLOCK_M1, BLOCK_N1, WINDOW_SIZE
-                    )
+                num_steps, start_m = bwd_calculate_num_steps(
+                    qlen, start_n, BLOCK_M1, BLOCK_N1, WINDOW_SIZE
+                )
+                if start_n < klen and num_steps > 0:
                     curr_m = start_m
                     step_m = BLOCK_M1
                     # Load K

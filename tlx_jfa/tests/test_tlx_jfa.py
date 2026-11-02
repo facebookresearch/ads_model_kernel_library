@@ -118,6 +118,57 @@ torch.empty = _nan_filled(torch.empty)
 torch.empty_like = _nan_filled(torch.empty_like)
 """
 
+# Backward over key tiles that no query block reaches: empty query sequences, and a
+# sliding window with cross attention (qlen <= start_n - window). Such tiles must not
+# hang, and their dK/dV rows must be 0 (dK and dV come from torch.empty_like).
+ZERO_STEP_KEY_TILES_SCRIPT = """
+import torch
+from oss_test_utils import assert_close, jagged_attention_reference, make_jagged_qkv
+from tlx_jagged_flash_attention import tlx_jagged_flash_attention
+
+# Window 64 with cross attention: sequence 0 has 100 queries and 400 keys, so its
+# key tiles at 256 and 384 get no query block.
+q_lens, kv_lens, window = [100, 172], [400, 130], 64
+q, k, v, q_offsets, kv_offsets = make_jagged_qkv(
+    seq_lens=q_lens,
+    kv_seq_lens=kv_lens,
+    heads=2,
+    dim=128,
+    dtype=torch.bfloat16,
+    device="cuda",
+    seed=29,
+    requires_grad=False,
+)
+grad_out = torch.randn_like(q)
+refs = [t.clone().requires_grad_(True) for t in (q, k, v)]
+ref = jagged_attention_reference(*refs, q_offsets, kv_offsets, window_size=window)
+ref.backward(grad_out)
+# Keys that no query attends to have exactly zero reference dV rows.
+unreached = (refs[2].grad == 0).all(dim=2).all(dim=1)
+assert unreached.any()
+for use_cpu_offsets in (False, True):
+    leaves = [t.clone().requires_grad_(True) for t in (q, k, v)]
+    out = tlx_jagged_flash_attention(
+        query=leaves[0],
+        key=leaves[1],
+        value=leaves[2],
+        query_offset=q_offsets,
+        key_offset=kv_offsets,
+        max_seq_len_q=max(q_lens),
+        max_seq_len_kv=max(kv_lens),
+        window_size=window,
+        cpu_query_offset=q_offsets.cpu() if use_cpu_offsets else None,
+        cpu_key_offset=kv_offsets.cpu() if use_cpu_offsets else None,
+    )[0]
+    out.backward(grad_out)
+    torch.cuda.synchronize()
+    for leaf, ref_leaf in zip(leaves, refs):
+        assert_close(leaf.grad, ref_leaf.grad, atol=2e-2, rtol=2e-2)
+    for leaf in leaves[1:]:
+        assert torch.all(leaf.grad[unreached] == 0)
+print("OK")
+"""
+
 
 def _run_in_child(script: str) -> subprocess.CompletedProcess:
     """Run a test script in a fresh Python process, so that a kernel hang or a
@@ -227,6 +278,18 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         groups ran no iteration, so the forward hung. Such tiles are now skipped by
         every group, and their O and M rows are written as zeros."""
         completed = _run_in_child(EMPTY_KEY_RANGE_SCRIPT)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    @skip_unless_blackwell(HAS_TLX_KERNEL)
+    def test_zero_step_key_tiles(self) -> None:
+        """Key tiles that no query block reaches (num_steps <= 0), from a sliding
+        window with cross attention: a key sequence longer than its query sequence
+        plus the window. The MMA and load tasks of the 1-CTA backward used to run the
+        tile's prolog while the compute task ran no step, so the backward hung. Such
+        tiles are now skipped by the MMA and load tasks, and the compute task writes
+        their zero dK/dV rows. Runs with and without CPU offsets (load-balanced and
+        dense tile schedules)."""
+        completed = _run_in_child(ZERO_STEP_KEY_TILES_SCRIPT)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def _run_vs_pytorch(self, *, seq_lens: list[int], window_size: int | None) -> None:
