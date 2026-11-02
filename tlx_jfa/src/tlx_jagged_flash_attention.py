@@ -153,6 +153,23 @@ def _compute_seq_len(
     return begin_q, end_q, begin_k, end_k, qlen, klen, off_z, off_h, start_m
 
 
+@triton.jit  # pragma: no cover
+def _kv_range(
+    start_m,
+    klen,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+):
+    # Keys [lo, hi) of M tile start_m. Empty for an empty key sequence, or for a
+    # window that covers no key; every warp group must then skip the tile.
+    lo, hi = 0, klen
+    if WINDOW_SIZE is not None:
+        lo = max(lo, ((start_m * BLOCK_M - WINDOW_SIZE) // BLOCK_N) * BLOCK_N)
+        hi = min(hi, (start_m + 1) * BLOCK_M + WINDOW_SIZE)
+    return lo, hi
+
+
 def compute_balanced_tiles(
     cpu_query_offsets: torch.Tensor,
     cpu_key_offsets: torch.Tensor,
@@ -576,13 +593,8 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                     )
                 )
                 out_offset = off_h.to(tl.int64) * stride_oh
-                if start_m * BLOCK_M < qlen:
-                    lo, hi = 0, klen
-                    if WINDOW_SIZE is not None:
-                        lo = max(
-                            lo, ((start_m * BLOCK_M - WINDOW_SIZE) // BLOCK_N) * BLOCK_N
-                        )
-                        hi = min(hi, (start_m + 1) * BLOCK_M + WINDOW_SIZE)
+                lo, hi = _kv_range(start_m, klen, BLOCK_M, BLOCK_N, WINDOW_SIZE)
+                if start_m * BLOCK_M < qlen and lo < hi:
                     for start_n in tl.range(lo, hi, BLOCK_N):
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         _, phase = _get_bufidx_phase(accum_cnt, 1)
@@ -722,13 +734,8 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                 qk_scale *= 1.44269504  # 1/log(2)
 
                 cid = tlx.async_task_replica_id()
-                if start_m * BLOCK_M < qlen:
-                    lo, hi = 0, klen
-                    if WINDOW_SIZE is not None:
-                        lo = max(
-                            lo, ((start_m * BLOCK_M - WINDOW_SIZE) // BLOCK_N) * BLOCK_N
-                        )
-                        hi = min(hi, (start_m + 1) * BLOCK_M + WINDOW_SIZE)
+                lo, hi = _kv_range(start_m, klen, BLOCK_M, BLOCK_N, WINDOW_SIZE)
+                if start_m * BLOCK_M < qlen and lo < hi:
                     # Loop peeling: for the no-window (PMA) case, split the KV
                     # loop into a bulk pass with no klen mask and a 0-or-1
                     # iteration tail with the mask. Removes the per-iteration
@@ -873,7 +880,8 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                         sm_start + j,
                     )
                 )
-                if start_m * BLOCK_M < qlen:
+                lo, hi = _kv_range(start_m, klen, BLOCK_M, BLOCK_N, WINDOW_SIZE)
+                if start_m * BLOCK_M < qlen and lo < hi:
                     q_bufIdx, q_phase = _get_bufidx_phase(accum_cnt_q, NUM_BUFFERS_Q)
                     k_bufIdx, k_phase = _get_bufidx_phase(accum_cnt_kv, NUM_BUFFERS_KV)
                     v_bufIdx, v_phase = _get_bufidx_phase(
@@ -885,13 +893,6 @@ def _attn_fwd_ws(  # noqa: C901, TR001
 
                     # wait for the Q buffer to be populated by the producer
                     tlx.barrier_wait(q_fulls[q_bufIdx], q_phase)
-
-                    lo, hi = 0, klen
-                    if WINDOW_SIZE is not None:
-                        lo = max(
-                            lo, ((start_m * BLOCK_M - WINDOW_SIZE) // BLOCK_N) * BLOCK_N
-                        )
-                        hi = min(hi, (start_m + 1) * BLOCK_M + WINDOW_SIZE)
 
                     # -- compute q0 @ k ----
                     k_tile = tlx.local_trans(kv_tiles[k_bufIdx])
@@ -1112,13 +1113,8 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                 q_offset = off_h.to(tl.int64) * stride_qh
                 kv_offset = off_h_kv.to(tl.int64) * stride_kh
 
-                if start_m * BLOCK_M < qlen:
-                    lo, hi = 0, klen
-                    if WINDOW_SIZE is not None:
-                        lo = max(
-                            lo, ((start_m * BLOCK_M - WINDOW_SIZE) // BLOCK_N) * BLOCK_N
-                        )
-                        hi = min(hi, (start_m + 1) * BLOCK_M + WINDOW_SIZE)
+                lo, hi = _kv_range(start_m, klen, BLOCK_M, BLOCK_N, WINDOW_SIZE)
+                if start_m * BLOCK_M < qlen and lo < hi:
                     # load q0
                     q_bufIdx, q_phase = _get_bufidx_phase(accum_cnt_q, NUM_BUFFERS_Q)
                     tlx.barrier_wait(q_empties[q_bufIdx], q_phase ^ 1)
@@ -1293,7 +1289,8 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                     begin_o = qlen * off_z
                     end_o = qlen * (off_z + 1)
                 _, phase = _get_bufidx_phase(accum_cnt, 1)
-                if start_m * BLOCK_M < qlen:
+                lo, hi = _kv_range(start_m, klen, BLOCK_M, BLOCK_N, WINDOW_SIZE)
+                if start_m * BLOCK_M < qlen and lo < hi:
                     desc_o = tl.make_tensor_descriptor(
                         Out,
                         shape=[end_o.to(tl.int32), HEAD_DIM * H],
@@ -1316,6 +1313,26 @@ def _attn_fwd_ws(  # noqa: C901, TR001
                         tlx.async_descriptor_store_wait(0)
                         tlx.barrier_arrive(o_empties[cid])
                     accum_cnt += 1
+                elif start_m * BLOCK_M < qlen:
+                    # No key in [lo, hi), so the other groups skipped the tile.
+                    # Attention over no keys is 0: write its zero O and M rows,
+                    # one row per iteration to keep this 1-warp group's registers.
+                    offs_d = tl.arange(0, BLOCK_D)
+                    zero_o = tl.zeros([BLOCK_D], Out.dtype.element_ty)
+                    row_end = tl.minimum(qlen, (start_m + 1) * BLOCK_M)
+                    for row in tl.range(start_m * BLOCK_M, row_end):
+                        o_row = (begin_o + row).to(tl.int64) * (HEAD_DIM * H)
+                        tl.store(
+                            Out + o_row + out_offset + offs_d,
+                            zero_o,
+                            mask=offs_d < HEAD_DIM,
+                        )
+                    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                    tl.store(
+                        M + begin_o + offs_m + off_h * stride_mh,
+                        tl.zeros([BLOCK_M], tl.float32),
+                        mask=offs_m < qlen,
+                    )
                 i += 1
                 if USE_CLC:
                     if USE_I64_IDX:

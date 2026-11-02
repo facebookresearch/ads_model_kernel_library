@@ -16,7 +16,9 @@ reference:
 
 import math
 import os
+import subprocess
 import sys
+import textwrap
 import unittest
 
 # Import as a plain directory of modules, both when discovered directly
@@ -29,6 +31,7 @@ from oss_test_utils import (  # noqa: E402
     jagged_attention_reference,
     make_jagged_qkv,
     skip_unless_blackwell,
+    SRC_DIR,
     torch,
 )
 
@@ -45,6 +48,95 @@ DIM = 128
 DTYPE = torch.bfloat16
 FWD_TOL = {"atol": 1e-2, "rtol": 1e-2}
 BWD_TOL = {"atol": 2e-2, "rtol": 2e-2}
+# Only needs to tell "ran" from "hung"; includes the child's Triton compilation.
+CHILD_TIMEOUT_S = 900
+
+# Forward over query tiles whose key range is empty: key sequences of length 0, and a
+# sliding window that ends before the keys of its query tile do. Such tiles must not
+# hang, and their output rows must be 0 (attention over no keys).
+EMPTY_KEY_RANGE_SCRIPT = """
+import torch
+from oss_test_utils import assert_close, jagged_attention_reference, make_jagged_qkv
+from tlx_jagged_flash_attention import tlx_jagged_flash_attention
+
+cases = (
+    # (query lens, key lens, window, query rows that see no key)
+    ([200, 128, 64], [0, 150, 0], None, [(0, 200), (328, 392)]),
+    # Rows 256..299 of sequence 0 lie past its 100 keys plus the window.
+    ([300, 40], [100, 300], 64, [(256, 300)]),
+)
+for q_lens, kv_lens, window, empty in cases:
+    q, k, v, q_offsets, kv_offsets = make_jagged_qkv(
+        seq_lens=q_lens,
+        kv_seq_lens=kv_lens,
+        heads=2,
+        dim=128,
+        dtype=torch.bfloat16,
+        device="cuda",
+        seed=43,
+        requires_grad=False,
+    )
+    ref = jagged_attention_reference(q, k, v, q_offsets, kv_offsets, window_size=window)
+    rows = torch.cat([torch.arange(lo, hi) for lo, hi in empty]).cuda()
+    # Rows that see no key of a non-empty range are NaN in the reference.
+    seen = ~ref.float().isnan().any(dim=2).any(dim=1)
+    for use_cpu_offsets in (False, True):
+        out, lse = tlx_jagged_flash_attention(
+            query=q,
+            key=k,
+            value=v,
+            query_offset=q_offsets,
+            key_offset=kv_offsets,
+            max_seq_len_q=max(q_lens),
+            max_seq_len_kv=max(kv_lens),
+            window_size=window,
+            cpu_query_offset=q_offsets.cpu() if use_cpu_offsets else None,
+            cpu_key_offset=kv_offsets.cpu() if use_cpu_offsets else None,
+        )
+        torch.cuda.synchronize()
+        assert torch.all(out[rows] == 0) and torch.all(lse[:, rows] == 0)
+        assert_close(out[seen], ref[seen], atol=1e-2, rtol=1e-2)
+print("OK")
+"""
+
+
+# Run first in every child: floating-point torch.empty/empty_like tensors come back
+# NaN-filled, so rows that a kernel leaves unwritten fail the comparisons.
+CHILD_PRELUDE = """
+import torch
+
+
+def _nan_filled(alloc):
+    def wrapped(*args, **kwargs):
+        t = alloc(*args, **kwargs)
+        return t.fill_(float("nan")) if t.is_floating_point() else t
+
+    return wrapped
+
+
+torch.empty = _nan_filled(torch.empty)
+torch.empty_like = _nan_filled(torch.empty_like)
+"""
+
+
+def _run_in_child(script: str) -> subprocess.CompletedProcess:
+    """Run a test script in a fresh Python process, so that a kernel hang or a
+    device-side assert (which poisons the CUDA context) fails only the child. The
+    child does not inherit this process's sys.path changes, so the kernel sources
+    and the test helpers are put on its path."""
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    prelude = f"import sys\nsys.path[:0] = [{str(SRC_DIR)!r}, {tests_dir!r}]\n"
+    prelude += textwrap.dedent(CHILD_PRELUDE)
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", prelude + textwrap.dedent(script)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=CHILD_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AssertionError(f"the kernel did not return within {e.timeout} s") from e
 
 
 class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
@@ -126,6 +218,16 @@ class TLXJaggedFlashAttentionBetaTest(unittest.TestCase):
         4-element aligned, so the backward routes to the 2-CTA kernel.
         """
         self._run_vs_pytorch(seq_lens=[128, 128, 128], window_size=None)
+
+    @skip_unless_blackwell(HAS_TLX_KERNEL)
+    def test_empty_key_range(self) -> None:
+        """Query tiles with no key in range: empty key sequences, and a sliding
+        window past the end of the keys (cross attention). The load and MMA groups
+        used to issue the first key tile anyway while the softmax and correction
+        groups ran no iteration, so the forward hung. Such tiles are now skipped by
+        every group, and their O and M rows are written as zeros."""
+        completed = _run_in_child(EMPTY_KEY_RANGE_SCRIPT)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def _run_vs_pytorch(self, *, seq_lens: list[int], window_size: int | None) -> None:
         sm_scale = 1.0 / math.sqrt(DIM)
