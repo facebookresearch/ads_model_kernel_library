@@ -3650,7 +3650,7 @@ def generalized_dot_product_attention_backward(
         else:
             restore_value = (
                 "DK",
-                "Dv",
+                "DV",
                 "DQ",
             )
     if dts_encoding is not None:
