@@ -54,7 +54,7 @@ class FlashAttentionBackwardSm80:
         AtomLayoutNdKV: int = 8,
         AtomLayoutMdQ: int = 1,
         V_in_regs: bool = False,
-    ):
+    ) -> None:
         """Initializes the configuration for a flash attention v2 kernel.
 
         All contiguous dimensions must be at least 16 bytes aligned which indicates the head dimension
@@ -176,7 +176,7 @@ class FlashAttentionBackwardSm80:
         mdQaccum_type: Type[cutlass.Numeric],
         mdK_type: Type[cutlass.Numeric],
         mdV_type: Type[cutlass.Numeric],
-    ):
+    ) -> None:
         if cutlass.const_expr(not (mQ_type == mK_type == mV_type == mdO_type)):
             raise TypeError("All tensors must have the same data type")
         if cutlass.const_expr(self.qhead_per_kvhead == 1):
@@ -199,7 +199,7 @@ class FlashAttentionBackwardSm80:
             raise TypeError("dQaccum tensor must be Float32")
         assert mQ_type == self.dtype
 
-    def _setup_attributes(self):
+    def _setup_attributes(self) -> None:
         # ///////////////////////////////////////////////////////////////////////////////
         # Shared memory layout: Q/K/V
         # ///////////////////////////////////////////////////////////////////////////////
@@ -341,7 +341,7 @@ class FlashAttentionBackwardSm80:
             self.gmem_tiled_copy_dK = self.gmem_tiled_copy_dQaccum
             self.gmem_tiled_copy_dV = self.gmem_tiled_copy_dQaccum
 
-    def _get_tiled_mma(self):
+    def _get_tiled_mma(self) -> tuple[cute.TiledMma, cute.TiledMma, cute.TiledMma]:
         num_mma_warps = self.num_threads // 32
         AtomLayoutSdP = (
             (self.AtomLayoutMSdP, num_mma_warps // self.AtomLayoutMSdP, 1)
@@ -375,7 +375,7 @@ class FlashAttentionBackwardSm80:
         )
         return tiled_mma_sdp, tiled_mma_dkv, tiled_mma_dq
 
-    def _get_shared_storage_cls(self):
+    def _get_shared_storage_cls(self) -> cute.struct:
         sQ_struct, sK_struct, sV_struct, sdO_struct = [
             cute.struct.Align[
                 cute.struct.MemRange[self.dtype, cute.cosize(layout)], 1024
@@ -447,7 +447,7 @@ class FlashAttentionBackwardSm80:
         mdV: cute.Tensor,
         softmax_scale: cutlass.Float32,
         stream: cuda.CUstream,
-    ):
+    ) -> None:
         # Get the data type and check if it is fp16 or bf16
         self._check_type(
             *(
@@ -532,7 +532,7 @@ class FlashAttentionBackwardSm80:
         tiled_mma_dkv: cute.TiledMma,
         tiled_mma_dq: cute.TiledMma,
         SharedStorage: cutlass.Constexpr,
-    ):
+    ) -> None:
         # Thread index, block index
         tidx, _, _ = cute.arch.thread_idx()
         n_block, head_idx, batch_idx = cute.arch.block_idx()
@@ -968,8 +968,8 @@ class FlashAttentionBackwardSm80:
         m_block_max: cutlass.Int32,
         softmax_scale_log2: cutlass.Float32,
         mask_fn: Optional[Callable] = None,
-    ):
-        def load_Q_next():
+    ) -> None:
+        def load_Q_next() -> None:
             m_block_next = m_block + (
                 self.num_stages_Q - 1
                 if cutlass.const_expr(self.num_stages_Q > 1)
@@ -979,7 +979,7 @@ class FlashAttentionBackwardSm80:
                 load_Q_LSE(m_block_next, smem_pipe_write_q)
             cute.arch.cp_async_commit_group()
 
-        def load_dO_next():
+        def load_dO_next() -> None:
             if m_block + self.num_stages_dO < m_block_max:
                 load_dO_dPsum(m_block + self.num_stages_dO, smem_pipe_write_do)
             cute.arch.cp_async_commit_group()
@@ -1119,7 +1119,7 @@ class FlashAttentionBackwardSm80:
         cute.arch.barrier()  # Make sure dS is written
 
         # MMA dQ
-        def dQ_mma(hook_fn):
+        def dQ_mma(hook_fn) -> None:
             acc_shape_dQ = mma_params.thr_mma_dq.partition_shape_C(
                 (self.m_block_size, self.head_dim_padded)
                 if cutlass.const_expr(not self.dQ_swapAB)
@@ -1203,7 +1203,7 @@ class FlashAttentionBackwardSm80:
         n_block: cutlass.Int32,
         num_head: cutlass.Int32,
         batch_size: cutlass.Int32,
-    ):
+    ) -> None:
         rdV = cute.make_fragment_like(acc_dV, self.dtype)
         rdV.store(acc_dV.load().to(self.dtype))
         rdK = cute.make_fragment_like(acc_dK, self.dtype)
@@ -1341,7 +1341,7 @@ class FlashAttentionBackwardSm80:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
         headdim: cutlass.Int32,
-    ):
+    ) -> None:
         cK = cute.make_identity_tensor((self.n_block_size, self.head_dim_padded))
         tKcK = gmem_thr_copy.partition_S(cK)
         t0KcK = gmem_thr_copy.get_slice(0).partition_S(cK)
@@ -1383,7 +1383,7 @@ class FlashAttentionBackwardSm80:
         block: cutlass.Int32,
         seqlen: cutlass.Int32,
         headdim: cutlass.Int32,
-    ):
+    ) -> None:
         cV = cute.make_identity_tensor((self.n_block_size, self.head_dim_v_padded))
         tVcV = gmem_thr_copy.partition_S(cV)
         t0VcV = gmem_thr_copy.get_slice(0).partition_S(cV)
@@ -1431,7 +1431,7 @@ class FlashAttentionBackwardSm80:
         block: cutlass.Int32,
         smem_pipe_write_q: cutlass.Int32,
         seqlen: cutlass.Int32,
-    ):
+    ) -> None:
         for m in cutlass.range_constexpr(cute.size(tQsQ.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
             if (
@@ -1498,7 +1498,7 @@ class FlashAttentionBackwardSm80:
         block: cutlass.Int32,
         smem_pipe_write_q: cutlass.Int32,
         seqlen: cutlass.Int32,
-    ):
+    ) -> None:
         for m in cutlass.range_constexpr(cute.size(tdOsdO.shape[1])):
             # If kBlockM doesn't evenly divide the tiled copy, only the last `m` needs to be checked
             if (
